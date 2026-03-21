@@ -1,0 +1,42 @@
+{
+  "name": "pi-mobius",
+  "version": "0.1.0",
+  "description": "Recovered Pi package for plan mode, sidebar, prompt improvement, and theme workflows.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "plan-mode",
+    "subagents",
+    "theme",
+    "skills"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@tintinweb/pi-subagents": "^0.4.11"
+  },
+  "bundledDependencies": [
+    "@tintinweb/pi-subagents"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ],
+    "themes": [
+      "./themes"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "packages": [
+    "..",
+    {
+      "source": "npm:@tintinweb/pi-subagents",
+      "extensions": []
+    }
+  ],
+  "theme": "opencode-nord",
+  "quietStartup": true,
+  "collapseChangelog": true,
+  "editorPaddingX": 1,
+  "autocompleteMaxVisible": 8,
+  "showHardwareCursor": true
+}
