@@ -7,7 +7,7 @@ Repo-owned Pi package that replaces the lost symlink/global setup with a version
 This package rebuilds the behavior that was still observable from the live Pi session and surviving global config:
 
 - plan mode with persisted `opencode-plan-state`
-- visible plan sidebar / panel state (`panelVisible: true`)
+- visible plan panel state (`panelVisible: true`)
 - `plan_enter` bootstrap flow
 - subagent integration via a local bridge around `@tintinweb/pi-subagents`
 - packaged `prompt-master` skill for prompt improvement
@@ -15,7 +15,7 @@ This package rebuilds the behavior that was still observable from the live Pi se
 
 ## Package contents
 
-- `extensions/opencode-plan-mode/` - recovered planning mode, sidebar, `question`, `plan_enter`, and `plan_exit`
+- `extensions/opencode-plan-mode/` - recovered planning mode, workflow rail / compact panel, `question`, `plan_enter`, and `plan_exit`
 - `extensions/subagents-bridge/` - local wrapper that loads and extends the upstream subagent package
 - `extensions/prompt-master-injection/` - prompt improvement helpers around the packaged skill
 - `skills/prompt-master/` - vendored prompt improvement skill
@@ -61,15 +61,18 @@ This repo also ships a local `.pi/settings.json` that points back to `..` and se
 ### Plan mode
 
 - `/plan` - enter planning mode in the current session
-- `/plan <request>` - start a fresh planning session for that request
-- `/plan status` - show current plan file and mode
-- `/plan sidebar` - toggle the right-side sidebar overlay
+- `/plan <request>` - improve the request with the packaged `prompt-master` skill, then start a fresh planning session with the improved prompt
+- `/plan status` - show current plan file, mode, and panel visibility
+- `/plan sidebar` - toggle the workflow rail / compact panel
 - `Tab` - toggle plan mode when the input editor is empty
 - `Ctrl+Alt+P` - toggle plan mode
-- `Ctrl+Alt+B` - toggle the sidebar overlay
+- `Ctrl+Alt+B` - toggle the workflow rail / compact panel
 
-While planning, the agent is expected to write the plan into `.pi/plans/<session>.md` and then call `plan_exit` for approval.
+When the terminal is wide enough, workflow state renders as a compact right-side rail for the overall session UI instead of attaching to the input editor render path. On narrow terminals, the editor keeps a compact workflow summary instead of dropping plan context entirely.
 
+`/plan <request>` first runs the packaged `prompt-master` skill in the current session, waits for a paste-ready planning prompt, and only then creates a fresh child session for planning. If prompt extraction fails, Pi still starts a fresh planning session but falls back to the original request.
+
+While planning, the agent is expected to write the plan into `.pi/plans/<session>.md` and then call `plan_exit` for approval. Approval is now explicit and resumable: the approved handoff persists goal, constraints, blockers, files, verification, ready-frontier data, and delegation guidance in session state. `/plan` in an approved session starts fresh-session execution, and the workflow rail / compact panel shows approval state, ready-now frontier, blockers, warnings, fan-in progress, and live subagent activity.
 ### Prompt improvement
 
 - `/prompt-improve <request>`
