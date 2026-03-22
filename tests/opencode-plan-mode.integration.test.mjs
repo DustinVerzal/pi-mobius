@@ -92,13 +92,21 @@ function createFakePi(branch) {
 
 function createCtx({ cwd, branch, selectResponses = [], editorResponses = [], inputResponses = [], newSessionCancelled = false }) {
   const ui = {
-    theme: { fg: (_color, text) => text },
+    theme: {
+      fg: (_color, text) => text,
+      bold: (text) => text,
+      strikethrough: (text) => text,
+    },
     notifications: [],
     statuses: [],
+    widgets: [],
     selectCalls: [],
     editorText: '',
     setStatus(key, value) {
       this.statuses.push({ key, value });
+    },
+    setWidget(key, content, options) {
+      this.widgets.push({ key, content, options });
     },
     notify(message, level) {
       this.notifications.push({ message, level });

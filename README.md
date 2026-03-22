@@ -35,6 +35,8 @@ Start Pi in the scope where you installed the package and confirm these commands
 - `/subagents-info` - should report that the bundled `@tintinweb/pi-subagents` package is loaded through the local bridge
 - `/plan status` - should show current planning status
 - `/agents` - should be available through the bundled subagent integration
+- `/rtk-status` - should report whether an external `rtk` binary is available; if it is not, the extension should say bash execution is safely falling back to normal Pi behavior
+- ask Pi to use `code_intel_repo_map` on `extensions/` - should return a bounded symbol summary and ignore `node_modules` / `.git`
 
 If you see duplicate-registration errors for `Agent` or `/agents`, jump to [Troubleshooting duplicate subagent registrations](#troubleshooting-duplicate-subagent-registrations).
 
@@ -75,6 +77,8 @@ This package rebuilds the behavior that was still observable from the live Pi se
 - `extensions/opencode-plan-mode/` - recovered planning mode, workflow rail / compact panel, `question`, `plan_enter`, and `plan_exit`
 - `extensions/subagents-bridge/` - local wrapper that loads and extends the upstream subagent package
 - `extensions/prompt-master-injection/` - prompt improvement helpers around the packaged skill
+- `extensions/rtk-integration/` - bash-only RTK integration that rewrites Pi `bash` tool calls through `rtk rewrite` when the external `rtk` binary is installed, and otherwise fails open to normal Pi bash execution
+- `extensions/code-intel/` - AST-backed repo mapping / structural search plus the first curated TypeScript LSP workflows
 - `skills/prompt-master/` - vendored prompt improvement skill
 - `themes/opencode-nord.json` - recovered Nord-based theme
 
@@ -96,12 +100,83 @@ When the terminal is wide enough, workflow state renders as a compact right-side
 
 While planning, the agent is expected to write the plan into `.pi/plans/<session>.md` and then call `plan_exit` for approval. Approval is now explicit, scrollable, and resumable: a bounded review overlay keeps the transcript readable while exposing the full plan, and the approved handoff persists goal, constraints, blockers, files, verification, ready-frontier data, and delegation guidance in session state. The review supports `↑/↓` or `j/k` scrolling, `PgUp/PgDn` plus `Home/End`, `Tab` or `←/→` for action switching, `Enter` to confirm, and `Esc` to keep planning. `/plan` in an approved session starts fresh-session execution, and the workflow rail / compact panel shows approval state, ready-now frontier, blockers, warnings, fan-in progress, and live subagent activity.
 
+### Pi multiline input (`Ctrl+J`)
+
+`pi-mobius` does not change Pi's prompt-input runtime behavior. Pi already exposes newline insertion as the configurable `tui.input.newLine` keybinding, which defaults to `shift+enter`.
+
+If you want `Ctrl+J` as an additional newline key, add this to your Pi user config at `~/.pi/agent/keybindings.json`:
+
+```json
+{
+  "tui.input.newLine": ["shift+enter", "ctrl+j"]
+}
+```
+
+Then run `/reload` in Pi to apply the change. This Pi-native config is especially useful in some terminal or tmux setups where `Shift+Enter` is remapped to a raw linefeed that Pi sees as `Ctrl+J`.
+
 ### Prompt improvement
 
 - `/prompt-improve <request>`
 - `/pm <request>`
 - `prompt_improve` tool for agent-driven workflows
 - direct skill invocation also works: `/skill:prompt-master ...`
+
+### RTK bash integration
+
+`pi-mobius` now ships an RTK integration extension, but it does **not** install RTK itself. Install the `rtk` binary separately using RTK's own installation instructions, then make sure `rtk` is on the `PATH` seen by the Pi process.
+
+Use `/rtk-status` to verify the current state:
+
+- **RTK available:** Pi's overridden `bash` tool will call `rtk rewrite <command>` before execution.
+- **RTK missing or unhealthy:** Pi will fail open and run the original bash command unchanged.
+
+The current integration is intentionally **bash-only**. Pi's built-in `read`, `grep`, `find`, and `ls` tools are not rewritten by this MVP.
+
+Good smoke checks after RTK is installed:
+
+- run `/rtk-status`
+- ask Pi to execute a bash-backed command such as `git status` or `rg TODO .`
+
+If `/rtk-status` says RTK is missing after install, restart Pi or run `/reload` after fixing your `PATH`.
+
+### Code intelligence
+
+`pi-mobius` now ships a repo-owned `code-intel` extension.
+
+Current tool families:
+
+- **AST:** `code_intel_repo_map`, `code_intel_ast_search`
+- **TypeScript LSP:** `code_intel_definition`, `code_intel_references`, `code_intel_hover`
+
+Quick local-checkout setup:
+
+```bash
+npm install
+pi install .
+```
+
+Then reload Pi:
+
+```text
+/reload
+```
+
+Recommended usage pattern:
+
+1. start with `code_intel_repo_map` for a bounded overview
+2. use `code_intel_ast_search` for JS/TS structural search
+3. switch to LSP tools when you need semantic TypeScript navigation
+4. fall back to built-in `grep` / `read` when you already know the exact file or need raw text
+
+Examples:
+
+- `Use code_intel_repo_map on extensions/code-intel.`
+- `Use code_intel_ast_search with pi.registerTool($$$ARGS) under extensions/.`
+- `Use code_intel_definition for extensions/code-intel/lsp.ts at line 487, column 22.`
+
+For full setup notes, decision boundaries, troubleshooting, and example workflows, see [`docs/code-intel-usage.md`](docs/code-intel-usage.md).
+
+For the MVP, **generic MCP bridging remains deferred**. The code-intel tools are Pi-native wrappers, not a general MCP bridge.
 
 ### Theme
 

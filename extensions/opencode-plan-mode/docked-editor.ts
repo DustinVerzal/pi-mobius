@@ -3,7 +3,6 @@ import { Key, matchesKey, type Component, type OverlayHandle, type TUI } from "@
 import {
   getDockedSidebarLayout,
   renderPlanSidebar,
-  renderPlanSidebarFallback,
   type PlanSidebarViewModel,
   type SidebarTheme,
 } from "./sidebar.js";
@@ -38,24 +37,50 @@ export class DockedPlanModeEditor extends CustomEditor {
   private readonly railOverlay: WorkflowRailOverlay;
   private railHandle: OverlayHandle | undefined;
   private railWidth: number | undefined;
+  private lastRenderWidth: number | undefined;
+
+  private presentationKey: string | undefined;
 
   constructor(
     tui: ConstructorParameters<typeof CustomEditor>[0],
     theme: ConstructorParameters<typeof CustomEditor>[1],
     keybindings: ConstructorParameters<typeof CustomEditor>[2],
-    private readonly sidebarTheme: SidebarTheme,
+    sidebarTheme: SidebarTheme,
     private readonly onEmptyTab: () => void,
+    private readonly onPresentationChange?: () => void,
   ) {
     super(tui, theme, keybindings);
     this.railOverlay = new WorkflowRailOverlay(tui, sidebarTheme);
   }
 
+  private getPresentationKey(width = this.lastRenderWidth): string {
+    if (!this.sidebarState) return "hidden";
+    if (typeof width !== "number") return "pending";
+    const layout = getDockedSidebarLayout(width, this.sidebarState);
+    return layout ? `docked:${layout.sidebarWidth}` : `compact:${width}`;
+  }
+
+  private notifyPresentationChange(): void {
+    const nextKey = this.getPresentationKey();
+    if (nextKey === this.presentationKey) return;
+    this.presentationKey = nextKey;
+    this.onPresentationChange?.();
+  }
+
   private syncRail(width?: number): void {
-    const layout = typeof width === "number" ? getDockedSidebarLayout(width, this.sidebarState) : undefined;
+    const resolvedWidth = typeof width === "number" ? width : this.lastRenderWidth;
+    const layout = typeof resolvedWidth === "number" ? getDockedSidebarLayout(resolvedWidth, this.sidebarState) : undefined;
     this.railOverlay.setModel(this.sidebarState);
 
-    if (!this.sidebarState || !layout) {
+    if (!this.sidebarState) {
       this.railHandle?.setHidden(true);
+      return;
+    }
+
+    if (!layout) {
+      if (typeof resolvedWidth === "number") {
+        this.railHandle?.setHidden(true);
+      }
       return;
     }
 
@@ -78,24 +103,20 @@ export class DockedPlanModeEditor extends CustomEditor {
   setSidebarState(state: PlanSidebarViewModel | undefined): void {
     this.sidebarState = state;
     this.syncRail();
+    this.notifyPresentationChange();
     this.invalidate();
     this.tui.requestRender();
   }
 
+  getLastRenderWidth(): number | undefined {
+    return this.lastRenderWidth;
+  }
+
   render(width: number): string[] {
+    this.lastRenderWidth = width;
     this.syncRail(width);
-    const editorLines = super.render(width);
-    const layout = getDockedSidebarLayout(width, this.sidebarState);
-    if (layout) {
-      return editorLines;
-    }
-
-    if (!this.sidebarState) {
-      return editorLines;
-    }
-
-    const fallback = renderPlanSidebarFallback(this.sidebarState, this.sidebarTheme, width);
-    return [...editorLines, "", ...fallback];
+    this.notifyPresentationChange();
+    return super.render(width);
   }
 
   handleInput(data: string): void {
@@ -110,5 +131,7 @@ export class DockedPlanModeEditor extends CustomEditor {
     this.railHandle?.hide();
     this.railHandle = undefined;
     this.railWidth = undefined;
+    this.lastRenderWidth = undefined;
+    this.presentationKey = undefined;
   }
 }

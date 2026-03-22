@@ -12,7 +12,7 @@ import {
 } from "../prompt-master-injection/index.js";
 import { DockedPlanModeEditor } from "./docked-editor.js";
 import { showApprovalReview } from "./approval-review.js";
-import type { PlanSidebarViewModel } from "./sidebar.js";
+import { getDockedSidebarLayout, renderPlanSidebarFallback, type PlanSidebarViewModel } from "./sidebar.js";
 import {
   buildExecutionHandoff,
   createPlanTemplate,
@@ -52,6 +52,7 @@ import {
 
 const STATE_ENTRY = "opencode-plan-state";
 const EXECUTE_ENTRY = "opencode-plan-execute";
+const WIDGET_KEY = "opencode-plan-workflow";
 const QUESTION_TOOL_NAME = "question";
 const PLAN_ENTER_TOOL_NAME = "plan_enter";
 const PLAN_EXIT_TOOL_NAME = "plan_exit";
@@ -358,8 +359,8 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     }
   }
 
-  function getSidebarViewModel(ctx: ExtensionContext): PlanSidebarViewModel | undefined {
-    if (state.mode === "normal" || state.panelVisible === false) return undefined;
+  function buildSidebarViewModel(ctx: ExtensionContext): PlanSidebarViewModel | undefined {
+    if (state.mode === "normal") return undefined;
 
     return {
       mode: state.mode,
@@ -372,18 +373,56 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       openQuestions: state.artifact?.openQuestions ?? [],
       nextAction: buildNextAction(),
       subagents: state.subagents,
-      toggleHint: "/plan sidebar • Ctrl+Alt+B hide rail",
+      toggleHint: state.panelVisible === false
+        ? "/plan sidebar • Ctrl+Alt+B show rail"
+        : "/plan sidebar • Ctrl+Alt+B hide rail",
     };
+  }
+
+  function getSidebarViewModel(ctx: ExtensionContext): PlanSidebarViewModel | undefined {
+    if (state.panelVisible === false) return undefined;
+    return buildSidebarViewModel(ctx);
+  }
+
+  function getCompactSidebarWidth(): number {
+    return Math.max(48, Math.min(88, planEditor?.getLastRenderWidth() ?? 72));
+  }
+
+  function clearWorkflowWidget(ctx: ExtensionContext): void {
+    if (!ctx.hasUI) return;
+    ctx.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
   }
 
   function syncSidebar(ctx: ExtensionContext): void {
     planEditor?.setSidebarState(getSidebarViewModel(ctx));
   }
 
+  function syncWorkflowWidget(ctx: ExtensionContext, model: PlanSidebarViewModel | undefined): void {
+    if (!ctx.hasUI) return;
+
+    if (!model) {
+      clearWorkflowWidget(ctx);
+      return;
+    }
+
+    const lastRenderWidth = planEditor?.getLastRenderWidth();
+    const railVisible = state.panelVisible !== false
+      && typeof lastRenderWidth === "number"
+      && Boolean(getDockedSidebarLayout(lastRenderWidth, model));
+
+    if (railVisible) {
+      clearWorkflowWidget(ctx);
+      return;
+    }
+
+    ctx.ui.setWidget(WIDGET_KEY, renderPlanSidebarFallback(model, ctx.ui.theme, getCompactSidebarWidth()), { placement: "belowEditor" });
+  }
+
   function updateUi(ctx: ExtensionContext): void {
     const steps = getSteps();
     const completed = steps.filter((step) => step.completed).length;
     const warningCount = state.execution?.warnings.length ?? 0;
+    const workflowModel = buildSidebarViewModel(ctx);
 
     if (state.mode === "executing" && steps.length > 0) {
       const warningSuffix = warningCount > 0 ? ctx.ui.theme.fg("warning", ` !${warningCount}`) : "";
@@ -401,6 +440,7 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       ctx.ui.setStatus("opencode-plan", undefined);
     }
 
+    syncWorkflowWidget(ctx, workflowModel);
     syncSidebar(ctx);
   }
 
@@ -428,6 +468,8 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
 
         exitPlanMode(ctx);
         ctx.ui.notify("Plan mode disabled.", "info");
+      }, () => {
+        scheduleStateFlush(ctx);
       });
       planEditor.setSidebarState(getSidebarViewModel(ctx));
       return planEditor;
@@ -1322,6 +1364,7 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     sessionVersion += 1;
     ctx.ui.setStatus("opencode-plan", undefined);
+    clearWorkflowWidget(ctx);
     planEditor?.setSidebarState(undefined);
     planEditor?.dispose?.();
     planEditor = undefined;
