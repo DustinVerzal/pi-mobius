@@ -1,15 +1,26 @@
-```text
-        _                       _     _           
-  _ __ (_)      _ __ ___   ___ | |__ (_)_   _ ___ 
- | '_ \| |_____| '_ ` _ \ / _ \| '_ \| | | | / __|
- | |_) | |_____| | | | | | (_) | |_) | | |_| \__ \
- | .__/|_|     |_| |_| |_|\___/|_.__/|_|\__,_|___/
- |_|                                              
-```
+<div align="center">
 
 # pi-mobius
 
-Pi package for Pi that bundles plan mode, a subagent bridge, prompt improvement helpers, RTK-aware bash execution, code-intel tools, and the `opencode-nord` theme.
+**Plan mode, subagents, prompt improvement, code intelligence, RTK-aware bash, and `opencode-nord` — bundled for Pi.**
+
+![Pi package](https://img.shields.io/badge/Pi-package-111827?style=for-the-badge)
+![Plan mode](https://img.shields.io/badge/plan-mode-7C3AED?style=for-the-badge)
+![Subagents](https://img.shields.io/badge/subagents-0EA5E9?style=for-the-badge)
+![Code intel](https://img.shields.io/badge/code--intel-059669?style=for-the-badge)
+![License](https://img.shields.io/badge/license-MIT-2563EB?style=for-the-badge)
+
+```bash
+pi install <git-or-https-source>
+```
+
+*One Pi package for planning, delegation, repo intelligence, and a polished terminal theme.*
+
+[Install](#install) · [Quick start](#quick-start) · [Usage](#usage) · [Package contents](#package-contents)
+
+</div>
+
+---
 
 ## What this package adds
 
