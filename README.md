@@ -1,3 +1,12 @@
+```text
+        _                       _     _           
+  _ __ (_)      _ __ ___   ___ | |__ (_)_   _ ___ 
+ | '_ \| |_____| '_ ` _ \ / _ \| '_ \| | | | / __|
+ | |_) | |_____| | | | | | (_) | |_) | | |_| \__ \
+ | .__/|_|     |_| |_| |_|\___/|_.__/|_|\__,_|___/
+ |_|                                              
+```
+
 # pi-mobius
 
 Pi package for Pi that bundles plan mode, a subagent bridge, prompt improvement helpers, RTK-aware bash execution, code-intel tools, and the `opencode-nord` theme.
