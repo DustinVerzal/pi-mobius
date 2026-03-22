@@ -7,7 +7,7 @@ Recovered planning mode extension for Pi.
 - `/plan` command, empty-editor `Tab` toggle, and `Ctrl+Alt+P` shortcut
 - `/plan <request>` improves the request with the packaged `prompt-master` skill, then starts a fresh planning session with the improved prompt
 - `plan_enter` tool that primes `/plan <request>` in the editor from a normal turn
-- `plan_exit` tool with summary-first approval, richer execution-readiness review, revision flow, and resumable fresh-session execution handoff
+- `plan_exit` tool with a dedicated bounded approval review surface, richer execution-readiness review, revision flow, and resumable fresh-session execution handoff
 - real plan file stored under `.pi/plans/<session>.md`
 - structured plan parsing for `Agent`, `Batch`, `Depends on`, step-level verification, and rationale metadata
 - planning mode restricts edits to the active plan file only
@@ -32,6 +32,6 @@ Recovered planning mode extension for Pi.
 
 If prompt-master fails to return a paste-ready prompt, `/plan <request>` still opens a fresh planning session but falls back to the original request.
 
-When the terminal is wide enough, workflow state renders as a compact right-side rail for the overall session UI instead of hanging off the input editor render path. On narrow terminals, the editor keeps a compact workflow summary instead of losing the plan surface.
+When the terminal is wide enough, workflow state renders as a compact right-side rail for the overall session UI instead of hanging off the input editor render path. The rail is intentionally height-bounded and summarized so transcript/tool output stays visually primary even with long goals, many steps, blockers, warnings, or subagent activity. On narrow terminals, the editor falls back to a compact multi-line summary instead of losing the plan surface.
 
-While planning, the agent should write the plan into the current plan file and then call `plan_exit` for approval. Approval now highlights execution-readiness details like verification, blockers, ready-frontier shape, and validation warnings. Users can also run `/plan` while planning to open the same summary-first approval flow directly, and once a plan is approved, `/plan` resumes into fresh-session execution with a persisted handoff packet plus stronger drift re-review / override handling.
+While planning, the agent should write the plan into the current plan file and then call `plan_exit` for approval. Approval now opens a dedicated bounded review overlay so long plans stay inside a fixed viewport while the transcript remains readable. The review supports `↑/↓` or `j/k` to scroll, `PgUp/PgDn` plus `Home/End` for faster movement, `Tab` or `←/→` to switch actions, `Enter` to confirm, and `Esc` to cancel back into planning. Users can also run `/plan` while planning to open the same approval flow directly, and once a plan is approved, `/plan` resumes into fresh-session execution with a persisted handoff packet plus stronger drift re-review / override handling.

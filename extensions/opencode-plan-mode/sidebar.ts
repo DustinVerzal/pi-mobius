@@ -27,6 +27,10 @@ export interface DockedSidebarLayout {
   gutterWidth: number;
 }
 
+export interface PlanSidebarRenderOptions {
+  maxLines?: number;
+}
+
 export const DOCKED_SIDEBAR_WIDTH_RATIO = 0.24;
 export const DOCKED_SIDEBAR_GUTTER_WIDTH = 1;
 export const MIN_DOCKED_SIDEBAR_TERM_WIDTH = 120;
@@ -37,26 +41,46 @@ const MAX_VISIBLE_WARNINGS = 1;
 const MAX_VISIBLE_SUBAGENTS = 2;
 const MAX_VISIBLE_STEPS = 3;
 const MAX_VISIBLE_SECTION_ITEMS = 1;
+const SECTION_LINE_LIMITS = {
+  goal: 2,
+  now: 2,
+  next: 2,
+  warning: 2,
+  subagent: 2,
+  step: 2,
+  blocker: 2,
+  question: 1,
+};
 
 function padAnsi(text: string, width: number): string {
   const truncated = truncateToWidth(text, width, "...", true);
   return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 }
 
-function wrapIntoBoxLines(theme: SidebarTheme, innerWidth: number, text: string): string[] {
-  const wrapped = wrapTextWithAnsi(text, innerWidth, { trim: false });
-  return wrapped.length > 0
-    ? wrapped.map((line) => theme.fg("border", "│") + padAnsi(line, innerWidth) + theme.fg("border", "│"))
-    : [emptyBoxLine(theme, innerWidth)];
-}
-
 function emptyBoxLine(theme: SidebarTheme, innerWidth: number): string {
   return theme.fg("border", "│") + " ".repeat(innerWidth) + theme.fg("border", "│");
 }
 
-function pushSection(lines: string[], theme: SidebarTheme, innerWidth: number, label: string, value?: string): void {
+function clampWrappedLines(theme: SidebarTheme, innerWidth: number, text: string, maxLines?: number): string[] {
+  const wrapped = wrapTextWithAnsi(text, innerWidth, { trim: false });
+  const baseLines = wrapped.length > 0 ? wrapped : [""];
+  if (!maxLines || baseLines.length <= maxLines) return baseLines;
+  if (maxLines <= 1) {
+    return [truncateToWidth(`${baseLines[0]} ${theme.fg("dim", "…")}`, innerWidth, "...", true)];
+  }
+
+  const visible = baseLines.slice(0, maxLines - 1);
+  const hiddenCount = baseLines.length - visible.length;
+  return [...visible, theme.fg("dim", `… +${hiddenCount} more line${hiddenCount === 1 ? "" : "s"}`)];
+}
+
+function wrapIntoBoxLines(theme: SidebarTheme, innerWidth: number, text: string, maxLines?: number): string[] {
+  return clampWrappedLines(theme, innerWidth, text, maxLines).map((line) => theme.fg("border", "│") + padAnsi(line, innerWidth) + theme.fg("border", "│"));
+}
+
+function pushSection(lines: string[], theme: SidebarTheme, innerWidth: number, label: string, value?: string, maxLines = 1): void {
   if (!value || value.trim().length === 0) return;
-  lines.push(...wrapIntoBoxLines(theme, innerWidth, `${theme.fg("muted", `${label}:`)} ${value}`));
+  lines.push(...wrapIntoBoxLines(theme, innerWidth, `${theme.fg("muted", `${label}:`)} ${value}`, maxLines));
 }
 
 function modeLabel(theme: SidebarTheme, mode: PlanMode): string {
@@ -101,14 +125,14 @@ function stepText(theme: SidebarTheme, step: PlanStep, currentStep?: number): st
   return theme.fg("text", `${step.step}. ${step.text}`);
 }
 
-function stepLines(theme: SidebarTheme, innerWidth: number, step: PlanStep, currentStep?: number): string[] {
+function stepLines(theme: SidebarTheme, innerWidth: number, step: PlanStep, currentStep?: number, maxLines = SECTION_LINE_LIMITS.step): string[] {
   const prefix = `${stepStatePrefix(theme, step, currentStep)} `;
   const metadata: string[] = [];
   if (step.agent) metadata.push(step.agent);
   if (typeof step.batch === "number") metadata.push(`b${step.batch}`);
   if (step.dependsOn.length > 0) metadata.push(`deps:${step.dependsOn.join(",")}`);
   const suffix = metadata.length > 0 ? theme.fg("dim", ` (${metadata.join(" • ")})`) : "";
-  const wrapped = wrapTextWithAnsi(stepText(theme, step, currentStep) + suffix, Math.max(8, innerWidth - visibleWidth(prefix)));
+  const wrapped = clampWrappedLines(theme, Math.max(8, innerWidth - visibleWidth(prefix)), stepText(theme, step, currentStep) + suffix, maxLines);
   return wrapped.map((line, index) => {
     const currentPrefix = index === 0 ? prefix : " ".repeat(visibleWidth(prefix));
     return theme.fg("border", "│") + padAnsi(`${currentPrefix}${line}`, innerWidth) + theme.fg("border", "│");
@@ -225,6 +249,7 @@ function renderCompactList(
   title: string,
   items: string[],
   countLabel?: string,
+  itemLineLimit = 1,
 ): void {
   if (items.length === 0 && !countLabel) return;
   lines.push(emptyBoxLine(theme, innerWidth));
@@ -233,7 +258,7 @@ function renderCompactList(
     lines.push(...wrapIntoBoxLines(theme, innerWidth, countLabel));
   }
   for (const item of items.slice(0, MAX_VISIBLE_SECTION_ITEMS)) {
-    lines.push(...wrapIntoBoxLines(theme, innerWidth, `• ${item}`));
+    lines.push(...wrapIntoBoxLines(theme, innerWidth, `• ${item}`, itemLineLimit));
   }
   const overflow = summarizeOverflow(theme, Math.max(0, items.length - MAX_VISIBLE_SECTION_ITEMS), title.toLowerCase());
   if (overflow) {
@@ -241,7 +266,20 @@ function renderCompactList(
   }
 }
 
-export function renderPlanSidebar(model: PlanSidebarViewModel, theme: SidebarTheme, width: number): string[] {
+function finalizeSidebarHeight(lines: string[], theme: SidebarTheme, innerWidth: number, maxLines?: number): string[] {
+  if (!maxLines || lines.length <= maxLines) return lines;
+  if (maxLines <= 3) return lines.slice(0, maxLines);
+
+  const bodyBudget = Math.max(1, maxLines - 2);
+  const hiddenCount = Math.max(0, lines.length - bodyBudget - 1);
+  return [
+    ...lines.slice(0, bodyBudget),
+    theme.fg("border", "│") + padAnsi(theme.fg("dim", `… +${hiddenCount} more rail line${hiddenCount === 1 ? "" : "s"}`), innerWidth) + theme.fg("border", "│"),
+    theme.fg("border", "╰") + theme.fg("border", "─".repeat(innerWidth)) + theme.fg("border", "╯"),
+  ];
+}
+
+export function renderPlanSidebar(model: PlanSidebarViewModel, theme: SidebarTheme, width: number, options: PlanSidebarRenderOptions = {}): string[] {
   const innerWidth = Math.max(24, width - 2);
   const currentStep = model.execution?.activeStep;
   const active = model.steps.find((step) => step.step === currentStep);
@@ -275,18 +313,18 @@ export function renderPlanSidebar(model: PlanSidebarViewModel, theme: SidebarThe
     pushSection(lines, theme, innerWidth, "Plan", theme.fg("dim", model.planPath));
   }
   if (model.goal) {
-    pushSection(lines, theme, innerWidth, "Goal", theme.fg("dim", model.goal));
+    pushSection(lines, theme, innerWidth, "Goal", theme.fg("dim", model.goal), SECTION_LINE_LIMITS.goal);
   }
   if (active) {
-    pushSection(lines, theme, innerWidth, "Now", theme.fg("accent", `${active.step}. ${active.text}`));
+    pushSection(lines, theme, innerWidth, "Now", theme.fg("accent", `${active.step}. ${active.text}`), SECTION_LINE_LIMITS.now);
   }
-  pushSection(lines, theme, innerWidth, "Next", theme.fg("text", model.nextAction));
+  pushSection(lines, theme, innerWidth, "Next", theme.fg("text", model.nextAction), SECTION_LINE_LIMITS.next);
 
   if (visibleWarnings.length > 0) {
     lines.push(emptyBoxLine(theme, innerWidth));
     lines.push(...wrapIntoBoxLines(theme, innerWidth, theme.bold(theme.fg("warning", "Warnings"))));
     for (const warning of visibleWarnings) {
-      lines.push(...wrapIntoBoxLines(theme, innerWidth, `${theme.fg("warning", "! ")}${warning}`));
+      lines.push(...wrapIntoBoxLines(theme, innerWidth, `${theme.fg("warning", "! ")}${warning}`, SECTION_LINE_LIMITS.warning));
     }
     const overflow = summarizeOverflow(theme, hiddenWarningCount, "warnings");
     if (overflow) {
@@ -297,7 +335,7 @@ export function renderPlanSidebar(model: PlanSidebarViewModel, theme: SidebarThe
   lines.push(emptyBoxLine(theme, innerWidth));
   lines.push(...wrapIntoBoxLines(theme, innerWidth, `${theme.fg("muted", "Subagents:")} ${summarizeSubagents(theme, model.subagents)}`));
   for (const agent of visibleSubagents) {
-    lines.push(...wrapIntoBoxLines(theme, innerWidth, `• ${subagentLine(theme, agent)}`));
+    lines.push(...wrapIntoBoxLines(theme, innerWidth, `• ${subagentLine(theme, agent)}`, SECTION_LINE_LIMITS.subagent));
   }
   const subagentOverflow = summarizeOverflow(theme, hiddenSubagentCount, "subagents");
   if (subagentOverflow) {
@@ -312,7 +350,7 @@ export function renderPlanSidebar(model: PlanSidebarViewModel, theme: SidebarThe
     for (const step of visibleSteps.visible) {
       lines.push(...stepLines(theme, innerWidth, step, currentStep));
       if (step.note && (step.step === currentStep || step.status === "blocked")) {
-        lines.push(...wrapIntoBoxLines(theme, innerWidth, `   ${theme.fg("dim", step.note)}`));
+        lines.push(...wrapIntoBoxLines(theme, innerWidth, `   ${theme.fg("dim", step.note)}`, 1));
       }
     }
     const hiddenSteps = summarizeOverflow(theme, visibleSteps.hiddenCount, "steps");
@@ -322,35 +360,39 @@ export function renderPlanSidebar(model: PlanSidebarViewModel, theme: SidebarThe
   }
 
   const blockerItems = [...blockedReasons, ...model.blockers];
-  renderCompactList(lines, theme, innerWidth, "Blockers", blockerItems, blockerItems.length > 0 ? theme.fg("warning", `${blockerItems.length} blocker(s)`) : undefined);
-  renderCompactList(lines, theme, innerWidth, "Open questions", model.openQuestions, model.openQuestions.length > 0 ? theme.fg("muted", `${model.openQuestions.length} open`) : undefined);
+  renderCompactList(lines, theme, innerWidth, "Blockers", blockerItems, blockerItems.length > 0 ? theme.fg("warning", `${blockerItems.length} blocker(s)`) : undefined, SECTION_LINE_LIMITS.blocker);
+  renderCompactList(lines, theme, innerWidth, "Open questions", model.openQuestions, model.openQuestions.length > 0 ? theme.fg("muted", `${model.openQuestions.length} open`) : undefined, SECTION_LINE_LIMITS.question);
 
   if (model.toggleHint) {
     lines.push(emptyBoxLine(theme, innerWidth));
-    lines.push(...wrapIntoBoxLines(theme, innerWidth, theme.fg("dim", model.toggleHint)));
+    lines.push(...wrapIntoBoxLines(theme, innerWidth, theme.fg("dim", model.toggleHint), 1));
   }
 
   lines.push(theme.fg("border", "╰") + theme.fg("border", "─".repeat(innerWidth)) + theme.fg("border", "╯"));
-  return lines;
+  return finalizeSidebarHeight(lines, theme, innerWidth, options.maxLines);
 }
 
 export function renderPlanSidebarFallback(model: PlanSidebarViewModel, theme: SidebarTheme, width: number): string[] {
   const completed = model.steps.filter((step) => step.completed).length;
-  const currentStep = model.steps.find((step) => step.step === model.execution?.activeStep);
   const warningCount = model.execution?.warnings.length ?? 0;
   const frontier = summarizeFrontier(theme, model);
   const fanIn = summarizeFanIn(theme, model);
-  const subagentSummary = model.subagents.length > 0 ? `${theme.fg("muted", "Agents:")} ${summarizeSubagents(theme, model.subagents)}` : undefined;
-  const summary = `${theme.fg("accent", theme.bold("PLAN"))} ${theme.fg("muted", `${completed}/${model.steps.length}`)} ${theme.fg("dim", "·")} ${modeLabel(theme, model.mode)}`;
-  const current = currentStep
+  const currentStep = model.steps.find((step) => step.step === model.execution?.activeStep);
+  const line1 = `${theme.fg("accent", theme.bold("PLAN"))} ${theme.fg("muted", `${completed}/${model.steps.length}`)} ${theme.fg("dim", "·")} ${modeLabel(theme, model.mode)} ${theme.fg("dim", "·")} ${approvalLabel(theme, model.mode)}`;
+  const line2 = frontier
+    ? `${theme.fg("muted", "Ready:")} ${frontier}${fanIn ? `${theme.fg("dim", " · ")}${fanIn}` : ""}`
+    : `${theme.fg("muted", "Next:")} ${model.nextAction}`;
+  const line3 = currentStep
     ? `${theme.fg("muted", "Now:")} ${currentStep.step}. ${currentStep.text}`
-    : `${theme.fg("muted", "Now:")} ${model.nextAction}`;
-  const next = `${theme.fg("muted", "Next:")} ${model.nextAction}`;
-  const ready = frontier ? `${theme.fg("muted", "Ready:")} ${frontier}` : undefined;
-  const fanInLine = fanIn ? `${theme.fg("muted", "Fan-in:")} ${fanIn}` : undefined;
-  const warnings = warningCount > 0 ? `${theme.fg("warning", `Warnings: ${warningCount}`)}` : undefined;
-  const lines = [summary, current, next, ready, fanInLine, warnings, subagentSummary].filter((line): line is string => Boolean(line));
-  return lines.map((line) => truncateToWidth(line, width, "...", true));
+    : `${theme.fg("muted", "Next:")} ${model.nextAction}`;
+  const statusParts = [
+    warningCount > 0 ? theme.fg("warning", `Warnings: ${warningCount}`) : undefined,
+    model.subagents.length > 0 ? `${theme.fg("muted", "Agents:")} ${summarizeSubagents(theme, model.subagents)}` : undefined,
+  ].filter(Boolean);
+  const line4 = statusParts.length > 0 ? statusParts.join(theme.fg("dim", " · ")) : undefined;
+  return [line1, line2, line3, line4]
+    .filter((line): line is string => Boolean(line))
+    .map((line) => truncateToWidth(line, width, "...", true));
 }
 
 export function getDockedSidebarLayout(totalWidth: number, model?: PlanSidebarViewModel): DockedSidebarLayout | undefined {

@@ -14,7 +14,9 @@ This checklist exercises the redesigned workflow end to end.
 
 ## Approval and execution
 - `plan_exit`
-  - shows the summary-first approval view
+  - shows the dedicated bounded approval review overlay
+  - keeps action choices visible while the plan body scrolls inside the viewport
+  - supports `↑/↓` or `j/k`, `PgUp/PgDn`, `Home/End`, `Tab` or `←/→`, `Enter`, and `Esc`
   - offers **Approve**, **Revise in editor**, and **Keep planning**
   - blocks approval when numbered steps are malformed
 - approved state
@@ -56,9 +58,14 @@ This checklist exercises the redesigned workflow end to end.
 ## UI surface
 - wide terminal
   - compact workflow rail renders on the right side of the overall session UI
+  - rail height stays bounded and preserves a complete box frame even with long goals, many steps, warnings, blockers, and subagent activity
   - chat/tool output remains visually primary while the rail still shows phase, progress, active step, warnings, and subagents at a glance
 - narrow terminal
   - compact workflow summary remains visible below the editor
+  - fallback summary stays to a small fixed number of lines instead of repeating long status text indefinitely
+- long-plan approval
+  - the approval review stays inside a fixed overlay viewport
+  - scrolling the summary never pushes the transcript or action row off-screen
 
 ## Competitive UX checks
 - compare the result against Codex / OpenCode / Claude Code principles

@@ -1,6 +1,63 @@
 # pi-mobius
 
-Repo-owned Pi package that replaces the lost symlink/global setup with a versioned package.
+Repo-owned Pi package that restores the lost symlink/global setup as a versioned package.
+
+## Recommended install
+
+For other users, prefer a git/URL install instead of telling them to clone the repo and run `pi install .`.
+
+Pi clones git/URL sources into a Pi-managed directory and runs `npm install` automatically. That matters for `pi-mobius`, because `extensions/subagents-bridge/index.ts` imports `@tintinweb/pi-subagents` at runtime.
+
+> Replace `<PUBLISHED_GIT_URL>` with the final public repo URL once it exists. This checkout currently has no configured git remote, so the README keeps a placeholder instead of guessing the final source string.
+
+### Global install
+
+```bash
+pi install <PUBLISHED_GIT_URL>
+```
+
+### Project-local install
+
+```bash
+pi install -l <PUBLISHED_GIT_URL>
+```
+
+### Direct answers for friend-sharing
+
+- **Is `pi install .` enough?** Only if that clone already ran `npm install` first.
+- **When is `npm install` required?** Any time you are loading `pi-mobius` from a local checkout or local path, including `pi install .`, `pi install /path/to/pi-mobius`, `pi install -l /path/to/pi-mobius`, or opening this repo directly after cloning it.
+- **Do users need to install the subagent extension separately?** No. `pi-mobius` already loads `@tintinweb/pi-subagents` through `extensions/subagents-bridge/`. Installing the standalone package in the same scope causes duplicate `Agent`, `get_subagent_result`, `steer_subagent`, or `/agents` registrations.
+
+## Quick smoke check after install
+
+Start Pi in the scope where you installed the package and confirm these commands work without extra setup:
+
+- `/subagents-info` - should report that the bundled `@tintinweb/pi-subagents` package is loaded through the local bridge
+- `/plan status` - should show current planning status
+- `/agents` - should be available through the bundled subagent integration
+
+If you see duplicate-registration errors for `Agent` or `/agents`, jump to [Troubleshooting duplicate subagent registrations](#troubleshooting-duplicate-subagent-registrations).
+
+## Local clone / contributor workflow
+
+A local path install does **not** install dependencies for you. For a fresh clone, run `npm install` before loading the package with Pi.
+
+```bash
+git clone <PUBLISHED_GIT_URL> pi-mobius
+cd pi-mobius
+npm install
+pi install .
+```
+
+Other local-path variants follow the same rule:
+
+```bash
+npm install
+pi install /absolute/path/to/pi-mobius
+pi install -l /absolute/path/to/pi-mobius
+```
+
+This repo also ships a local `.pi/settings.json` that points back to `..` and selects `opencode-nord`, so opening Pi inside this repo works after `npm install`.
 
 ## Recovered baseline
 
@@ -21,41 +78,6 @@ This package rebuilds the behavior that was still observable from the live Pi se
 - `skills/prompt-master/` - vendored prompt improvement skill
 - `themes/opencode-nord.json` - recovered Nord-based theme
 
-## Install
-
-### Local development from this repo
-
-Because this package loads the upstream subagent package from the bundled dependency, install dependencies first:
-
-```bash
-npm install
-pi install /absolute/path/to/pi-mobius
-```
-
-For a one-off run without installing globally:
-
-```bash
-pi -e /absolute/path/to/pi-mobius/extensions/opencode-plan-mode/index.ts
-```
-
-### Project-local install
-
-From another project:
-
-```bash
-pi install -l /absolute/path/to/pi-mobius
-```
-
-Or add the repo path to `.pi/settings.json` manually:
-
-```json
-{
-  "packages": ["/absolute/path/to/pi-mobius"]
-}
-```
-
-This repo also ships a local `.pi/settings.json` that points back to `..` and selects `opencode-nord`, so opening Pi inside this repo uses the package directly after `npm install`. The subagent tools are loaded through `extensions/subagents-bridge/`, so the upstream package stays managed as a dependency instead of a separate top-level extension. That local settings file also shadows any standalone `npm:@tintinweb/pi-subagents` package with `extensions: []` to prevent duplicate `Agent` / `/agents` registrations while working in this repo.
-
 ## Usage
 
 ### Plan mode
@@ -68,11 +90,12 @@ This repo also ships a local `.pi/settings.json` that points back to `..` and se
 - `Ctrl+Alt+P` - toggle plan mode
 - `Ctrl+Alt+B` - toggle the workflow rail / compact panel
 
-When the terminal is wide enough, workflow state renders as a compact right-side rail for the overall session UI instead of attaching to the input editor render path. On narrow terminals, the editor keeps a compact workflow summary instead of dropping plan context entirely.
+When the terminal is wide enough, workflow state renders as a compact right-side rail for the overall session UI instead of attaching to the input editor render path. The rail is intentionally height-bounded and summarized so long goals, warnings, blockers, and subagent activity do not overtake the transcript. On narrow terminals, the editor keeps a compact multi-line workflow summary instead of dropping plan context entirely.
 
 `/plan <request>` first runs the packaged `prompt-master` skill in the current session, waits for a paste-ready planning prompt, and only then creates a fresh child session for planning. If prompt extraction fails, Pi still starts a fresh planning session but falls back to the original request.
 
-While planning, the agent is expected to write the plan into `.pi/plans/<session>.md` and then call `plan_exit` for approval. Approval is now explicit and resumable: the approved handoff persists goal, constraints, blockers, files, verification, ready-frontier data, and delegation guidance in session state. `/plan` in an approved session starts fresh-session execution, and the workflow rail / compact panel shows approval state, ready-now frontier, blockers, warnings, fan-in progress, and live subagent activity.
+While planning, the agent is expected to write the plan into `.pi/plans/<session>.md` and then call `plan_exit` for approval. Approval is now explicit, scrollable, and resumable: a bounded review overlay keeps the transcript readable while exposing the full plan, and the approved handoff persists goal, constraints, blockers, files, verification, ready-frontier data, and delegation guidance in session state. The review supports `↑/↓` or `j/k` scrolling, `PgUp/PgDn` plus `Home/End`, `Tab` or `←/→` for action switching, `Enter` to confirm, and `Esc` to keep planning. `/plan` in an approved session starts fresh-session execution, and the workflow rail / compact panel shows approval state, ready-now frontier, blockers, warnings, fan-in progress, and live subagent activity.
+
 ### Prompt improvement
 
 - `/prompt-improve <request>`
@@ -92,27 +115,28 @@ Select the recovered theme with:
 
 ## Notes on subagents
 
-`@tintinweb/pi-subagents` is kept as an upstream dependency rather than being forked into this repo. Our local `extensions/subagents-bridge/` wrapper imports the upstream package and registers it through our package, which lets us extend the behavior without maintaining a fork. Add any local custom commands, hooks, or policy tweaks in that bridge file after the upstream call.
+`@tintinweb/pi-subagents` stays upstream. Our local `extensions/subagents-bridge/` wrapper imports that package and registers it through `pi-mobius`, which lets this repo extend the behavior without forking the upstream package.
 
 The wrapper also exposes `/subagents-info` as a small local sanity-check command.
 
-When running inside this repo, `.pi/settings.json` loads the package normally and the bridge extension handles the upstream subagent tools, so `Agent`, `get_subagent_result`, `steer_subagent`, and `/agents` are provided once through the wrapper.
+In any scope where `pi-mobius` is active, this package should be the single owner of subagent registration. The bridge provides `Agent`, `get_subagent_result`, `steer_subagent`, and `/agents` through the package itself.
 
-### Troubleshooting duplicate subagent registrations
+## Troubleshooting duplicate subagent registrations
 
-`pi-mobius` should be the single owner of subagent registration in any scope where this package is active. A separate global or project install of `npm:@tintinweb/pi-subagents` in the same scope will conflict with the bridge and produce duplicate tool/command errors for `Agent`, `get_subagent_result`, `steer_subagent`, or `/agents`.
+`pi-mobius` should be the only active owner of subagent registration in a given scope. A separate global or project install of `npm:@tintinweb/pi-subagents` in that same scope will conflict with the bridge and produce duplicate-registration errors for `Agent`, `get_subagent_result`, `steer_subagent`, or `/agents`.
 
 Preferred remediation order:
 
 1. Keep `pi-mobius` as the active subagent integration.
-2. Remove the standalone `npm:@tintinweb/pi-subagents` package from that scope, or shadow it with `extensions: []`.
+2. Remove the standalone `npm:@tintinweb/pi-subagents` package from that scope.
+3. If you still want the standalone package installed elsewhere, shadow it in the scope where `pi-mobius` is active by disabling its extensions.
 
 Project-level shadow example:
 
 ```json
 {
   "packages": [
-    "/absolute/path/to/pi-mobius",
+    "<pi-mobius source>",
     {
       "source": "npm:@tintinweb/pi-subagents",
       "extensions": []
@@ -121,4 +145,8 @@ Project-level shadow example:
 }
 ```
 
-That override is the approach used by this repo's own `.pi/settings.json`, which lets you keep a standalone global install for other projects while preventing conflicts here.
+That shadow pattern matches this repo's own `.pi/settings.json`: it keeps `pi-mobius` active while preventing duplicate subagent registrations inside this repo.
+
+## Maintainer validation checklist
+
+See `docs/install.md` for the full install matrix, clean-room validation flow, and duplicate-subagent troubleshooting checklist.

@@ -11,6 +11,7 @@ import {
   extractPromptMasterPromptFromMessage,
 } from "../prompt-master-injection/index.js";
 import { DockedPlanModeEditor } from "./docked-editor.js";
+import { showApprovalReview } from "./approval-review.js";
 import type { PlanSidebarViewModel } from "./sidebar.js";
 import {
   buildExecutionHandoff,
@@ -696,7 +697,11 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       const optionsList = validation.errors.length > 0
         ? ["Revise in editor", "Keep planning"]
         : [options.directStart ? "Approve and start execution" : "Approve plan", "Revise in editor", "Keep planning"];
-      const choice = await ctx.ui.select(summary, optionsList);
+      const choice = await showApprovalReview(ctx, {
+        title: "Review plan for approval",
+        summary,
+        options: optionsList,
+      });
 
       if (!choice || choice === "Keep planning") {
         state.mode = "planning";
