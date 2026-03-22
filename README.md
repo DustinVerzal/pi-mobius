@@ -1,51 +1,46 @@
 # pi-mobius
 
-Repo-owned Pi package that restores the lost symlink/global setup as a versioned package.
+Pi package for Pi that bundles plan mode, a subagent bridge, prompt improvement helpers, RTK-aware bash execution, code-intel tools, and the `opencode-nord` theme.
 
-## Recommended install
+## What this package adds
 
-For other users, prefer a git/URL install instead of telling them to clone the repo and run `pi install .`.
+- **Plan mode** with persisted state, approval flow, and workflow rail / compact panel
+- **Subagent bridge** around `@tintinweb/pi-subagents`, including `/agents` and `/subagents-info`
+- **Prompt improvement** via the bundled `prompt-master` skill and helper commands
+- **Code intelligence** tools for AST search and TypeScript LSP navigation
+- **RTK bash integration** that rewrites Pi `bash` calls through `rtk rewrite` when RTK is installed
+- **Theme**: `opencode-nord`
 
-Pi clones git/URL sources into a Pi-managed directory and runs `npm install` automatically. That matters for `pi-mobius`, because `extensions/subagents-bridge/index.ts` imports `@tintinweb/pi-subagents` at runtime.
+## Requirements
 
-> Replace `<PUBLISHED_GIT_URL>` with the final public repo URL once it exists. This checkout currently has no configured git remote, so the README keeps a placeholder instead of guessing the final source string.
+- Pi `0.61.1` or newer
+- `npm` for local-checkout installs
+- Optional: `rtk` on your `PATH` if you want RTK bash rewriting
 
-### Global install
+## Install
+
+Like other Pi packages, this repo works best when installed from a package source instead of a live working tree.
+
+### Recommended: install from git / URL
+
+For published package sources, prefer a git or HTTPS install. Pi clones the package into a Pi-managed directory and runs `npm install` automatically.
 
 ```bash
-pi install <PUBLISHED_GIT_URL>
+pi install <git-or-https-source>
 ```
 
-### Project-local install
+Project-local install:
 
 ```bash
-pi install -l <PUBLISHED_GIT_URL>
+pi install -l <git-or-https-source>
 ```
 
-### Direct answers for friend-sharing
+### Install from a local checkout
 
-- **Is `pi install .` enough?** Only if that clone already ran `npm install` first.
-- **When is `npm install` required?** Any time you are loading `pi-mobius` from a local checkout or local path, including `pi install .`, `pi install /path/to/pi-mobius`, `pi install -l /path/to/pi-mobius`, or opening this repo directly after cloning it.
-- **Do users need to install the subagent extension separately?** No. `pi-mobius` already loads `@tintinweb/pi-subagents` through `extensions/subagents-bridge/`. Installing the standalone package in the same scope causes duplicate `Agent`, `get_subagent_result`, `steer_subagent`, or `/agents` registrations.
-
-## Quick smoke check after install
-
-Start Pi in the scope where you installed the package and confirm these commands work without extra setup:
-
-- `/subagents-info` - should report that the bundled `@tintinweb/pi-subagents` package is loaded through the local bridge
-- `/plan status` - should show current planning status
-- `/agents` - should be available through the bundled subagent integration
-- `/rtk-status` - should report whether an external `rtk` binary is available; if it is not, the extension should say bash execution is safely falling back to normal Pi behavior
-- ask Pi to use `code_intel_repo_map` on `extensions/` - should return a bounded symbol summary and ignore `node_modules` / `.git`
-
-If you see duplicate-registration errors for `Agent` or `/agents`, jump to [Troubleshooting duplicate subagent registrations](#troubleshooting-duplicate-subagent-registrations).
-
-## Local clone / contributor workflow
-
-A local path install does **not** install dependencies for you. For a fresh clone, run `npm install` before loading the package with Pi.
+For local path installs, Pi does **not** install dependencies for you. Run `npm install` first.
 
 ```bash
-git clone <PUBLISHED_GIT_URL> pi-mobius
+git clone <repo-url> pi-mobius
 cd pi-mobius
 npm install
 pi install .
@@ -59,114 +54,73 @@ pi install /absolute/path/to/pi-mobius
 pi install -l /absolute/path/to/pi-mobius
 ```
 
-This repo also ships a local `.pi/settings.json` that points back to `..` and selects `opencode-nord`, so opening Pi inside this repo works after `npm install`.
+### Try without installing
 
-## Recovered baseline
+```bash
+npm install
+pi -e .
+```
 
-This package rebuilds the behavior that was still observable from the live Pi session and surviving global config:
+## Quick start
 
-- plan mode with persisted `opencode-plan-state`
-- visible plan panel state (`panelVisible: true`)
-- `plan_enter` bootstrap flow
-- subagent integration via a local bridge around `@tintinweb/pi-subagents`
-- packaged `prompt-master` skill for prompt improvement
-- packaged `opencode-nord` theme
+After install, start Pi in the scope where the package is active and verify:
 
-## Package contents
+- `/subagents-info` — confirms the bundled subagent bridge is loaded
+- `/plan status` — shows current planning state
+- `/agents` — opens the bundled subagent UI
+- `/rtk-status` — reports whether RTK rewriting is active
+- ask Pi to use `code_intel_repo_map` on `extensions/` — confirms the code-intel tools are available
 
-- `extensions/opencode-plan-mode/` - recovered planning mode, workflow rail / compact panel, `question`, `plan_enter`, and `plan_exit`
-- `extensions/subagents-bridge/` - local wrapper that loads and extends the upstream subagent package
-- `extensions/prompt-master-injection/` - prompt improvement helpers around the packaged skill
-- `extensions/rtk-integration/` - bash-only RTK integration that rewrites Pi `bash` tool calls through `rtk rewrite` when the external `rtk` binary is installed, and otherwise fails open to normal Pi bash execution
-- `extensions/code-intel/` - AST-backed repo mapping / structural search plus the first curated TypeScript LSP workflows
-- `skills/prompt-master/` - vendored prompt improvement skill
-- `themes/opencode-nord.json` - recovered Nord-based theme
+If Pi is already running when you install the package, run `/reload`.
 
 ## Usage
 
 ### Plan mode
 
-- `/plan` - enter planning mode in the current session
-- `/plan <request>` - improve the request with the packaged `prompt-master` skill, then start a fresh planning session with the improved prompt
-- `/plan status` - show current plan file, mode, and panel visibility
-- `/plan sidebar` - toggle the workflow rail / compact panel
-- `Tab` - toggle plan mode when the input editor is empty
-- `Ctrl+Alt+P` - toggle plan mode
-- `Ctrl+Alt+B` - toggle the workflow rail / compact panel
+Commands:
 
-When the terminal is wide enough, workflow state renders as a compact right-side rail for the overall session UI instead of attaching to the input editor render path. The rail is intentionally height-bounded and summarized so long goals, warnings, blockers, and subagent activity do not overtake the transcript. On narrow terminals, the editor keeps a compact multi-line workflow summary instead of dropping plan context entirely.
+- `/plan` — enter plan mode in the current session
+- `/plan <request>` — improve the request with `prompt-master`, then start a fresh planning session
+- `/plan status` — show current plan file, mode, and panel visibility
+- `/plan sidebar` — toggle the workflow rail / compact panel
 
-`/plan <request>` first runs the packaged `prompt-master` skill in the current session, waits for a paste-ready planning prompt, and only then creates a fresh child session for planning. If prompt extraction fails, Pi still starts a fresh planning session but falls back to the original request.
+Shortcuts:
 
-While planning, the agent is expected to write the plan into `.pi/plans/<session>.md` and then call `plan_exit` for approval. Approval is now explicit, scrollable, and resumable: a bounded review overlay keeps the transcript readable while exposing the full plan, and the approved handoff persists goal, constraints, blockers, files, verification, ready-frontier data, and delegation guidance in session state. The review supports `↑/↓` or `j/k` scrolling, `PgUp/PgDn` plus `Home/End`, `Tab` or `←/→` for action switching, `Enter` to confirm, and `Esc` to keep planning. `/plan` in an approved session starts fresh-session execution, and the workflow rail / compact panel shows approval state, ready-now frontier, blockers, warnings, fan-in progress, and live subagent activity.
+- `Tab` — toggle plan mode when the input editor is empty
+- `Ctrl+Alt+P` — toggle plan mode
+- `Ctrl+Alt+B` — toggle the workflow rail / compact panel
 
-### Pi multiline input (`Ctrl+J`)
+Behavior:
 
-`pi-mobius` does not change Pi's prompt-input runtime behavior. Pi already exposes newline insertion as the configurable `tui.input.newLine` keybinding, which defaults to `shift+enter`.
-
-If you want `Ctrl+J` as an additional newline key, add this to your Pi user config at `~/.pi/agent/keybindings.json`:
-
-```json
-{
-  "tui.input.newLine": ["shift+enter", "ctrl+j"]
-}
-```
-
-Then run `/reload` in Pi to apply the change. This Pi-native config is especially useful in some terminal or tmux setups where `Shift+Enter` is remapped to a raw linefeed that Pi sees as `Ctrl+J`.
+- Plans are written to `.pi/plans/<session>.md`
+- `plan_exit` opens the explicit approval flow
+- Approved sessions persist goal, blockers, files, verification notes, ready-frontier data, and delegation guidance
+- On wide terminals, workflow state renders as a compact right-side rail; on narrow terminals, Pi falls back to a compact editor summary
 
 ### Prompt improvement
 
+Available entry points:
+
 - `/prompt-improve <request>`
 - `/pm <request>`
-- `prompt_improve` tool for agent-driven workflows
-- direct skill invocation also works: `/skill:prompt-master ...`
-
-### RTK bash integration
-
-`pi-mobius` now ships an RTK integration extension, but it does **not** install RTK itself. Install the `rtk` binary separately using RTK's own installation instructions, then make sure `rtk` is on the `PATH` seen by the Pi process.
-
-Use `/rtk-status` to verify the current state:
-
-- **RTK available:** Pi's overridden `bash` tool will call `rtk rewrite <command>` before execution.
-- **RTK missing or unhealthy:** Pi will fail open and run the original bash command unchanged.
-
-The current integration is intentionally **bash-only**. Pi's built-in `read`, `grep`, `find`, and `ls` tools are not rewritten by this MVP.
-
-Good smoke checks after RTK is installed:
-
-- run `/rtk-status`
-- ask Pi to execute a bash-backed command such as `git status` or `rg TODO .`
-
-If `/rtk-status` says RTK is missing after install, restart Pi or run `/reload` after fixing your `PATH`.
+- `prompt_improve` tool
+- `/skill:prompt-master ...`
 
 ### Code intelligence
 
-`pi-mobius` now ships a repo-owned `code-intel` extension.
+This package includes a repo-owned `code-intel` extension.
 
-Current tool families:
+Tool families:
 
-- **AST:** `code_intel_repo_map`, `code_intel_ast_search`
-- **TypeScript LSP:** `code_intel_definition`, `code_intel_references`, `code_intel_hover`
+- **AST**: `code_intel_repo_map`, `code_intel_ast_search`
+- **TypeScript LSP**: `code_intel_definition`, `code_intel_references`, `code_intel_hover`
 
-Quick local-checkout setup:
+Recommended workflow:
 
-```bash
-npm install
-pi install .
-```
-
-Then reload Pi:
-
-```text
-/reload
-```
-
-Recommended usage pattern:
-
-1. start with `code_intel_repo_map` for a bounded overview
-2. use `code_intel_ast_search` for JS/TS structural search
-3. switch to LSP tools when you need semantic TypeScript navigation
-4. fall back to built-in `grep` / `read` when you already know the exact file or need raw text
+1. Start with `code_intel_repo_map` for a bounded overview
+2. Use `code_intel_ast_search` for JS/TS symbol or structural search
+3. Use LSP tools for semantic TypeScript navigation
+4. Fall back to built-in `grep` or `read` when you already know the exact file
 
 Examples:
 
@@ -174,13 +128,27 @@ Examples:
 - `Use code_intel_ast_search with pi.registerTool($$$ARGS) under extensions/.`
 - `Use code_intel_definition for extensions/code-intel/lsp.ts at line 487, column 22.`
 
-For full setup notes, decision boundaries, troubleshooting, and example workflows, see [`docs/code-intel-usage.md`](docs/code-intel-usage.md).
+For setup notes, decision boundaries, troubleshooting, and example workflows, see [`docs/code-intel-usage.md`](docs/code-intel-usage.md).
 
-For the MVP, **generic MCP bridging remains deferred**. The code-intel tools are Pi-native wrappers, not a general MCP bridge.
+### RTK bash integration
+
+`pi-mobius` can override Pi's `bash` tool through RTK, but it does **not** install RTK itself.
+
+Install the external `rtk` binary using RTK's own instructions, then verify with:
+
+```text
+/rtk-status
+```
+
+Behavior:
+
+- **RTK available**: Pi rewrites `bash` commands through `rtk rewrite <command>`
+- **RTK missing or unhealthy**: Pi fails open and runs the original bash command unchanged
+- The current integration is intentionally **bash-only**; built-in `read`, `grep`, `find`, and `ls` are not rewritten
 
 ### Theme
 
-Select the recovered theme with:
+Select the bundled theme in your Pi config:
 
 ```json
 {
@@ -188,25 +156,52 @@ Select the recovered theme with:
 }
 ```
 
-## Notes on subagents
+### Pi multiline input (`Ctrl+J`)
 
-`@tintinweb/pi-subagents` stays upstream. Our local `extensions/subagents-bridge/` wrapper imports that package and registers it through `pi-mobius`, which lets this repo extend the behavior without forking the upstream package.
+`pi-mobius` does not change Pi's input behavior. Pi already exposes newline insertion as the configurable `tui.input.newLine` keybinding, which defaults to `shift+enter`.
 
-The wrapper also exposes `/subagents-info` as a small local sanity-check command.
+If you want `Ctrl+J` as an additional newline key, add this to `~/.pi/agent/keybindings.json`:
 
-In any scope where `pi-mobius` is active, this package should be the single owner of subagent registration. The bridge provides `Agent`, `get_subagent_result`, `steer_subagent`, and `/agents` through the package itself.
+```json
+{
+  "tui.input.newLine": ["shift+enter", "ctrl+j"]
+}
+```
 
-## Troubleshooting duplicate subagent registrations
+Then run `/reload`.
 
-`pi-mobius` should be the only active owner of subagent registration in a given scope. A separate global or project install of `npm:@tintinweb/pi-subagents` in that same scope will conflict with the bridge and produce duplicate-registration errors for `Agent`, `get_subagent_result`, `steer_subagent`, or `/agents`.
+## Package contents
 
-Preferred remediation order:
+- `extensions/opencode-plan-mode/` — plan mode, workflow rail / compact panel, `question`, `plan_enter`, and `plan_exit`
+- `extensions/subagents-bridge/` — local wrapper around `@tintinweb/pi-subagents`
+- `extensions/prompt-master-injection/` — prompt-improvement helpers around the bundled skill
+- `extensions/rtk-integration/` — RTK-backed `bash` rewriting with fail-open fallback
+- `extensions/code-intel/` — AST-backed repo mapping / structural search and TypeScript LSP workflows
+- `skills/prompt-master/` — bundled prompt-improvement skill
+- `themes/opencode-nord.json` — bundled theme
 
-1. Keep `pi-mobius` as the active subagent integration.
-2. Remove the standalone `npm:@tintinweb/pi-subagents` package from that scope.
-3. If you still want the standalone package installed elsewhere, shadow it in the scope where `pi-mobius` is active by disabling its extensions.
+## Troubleshooting
 
-Project-level shadow example:
+### Local install works differently from git / URL install
+
+A fresh local clone is **not** the same as a git / URL install.
+
+- **Git / URL installs** clone into a Pi-managed directory and run `npm install`
+- **Local path installs** (`pi install .`, `pi install /path`, `pi install -l /path`) do not install dependencies
+
+If a local install fails to load `extensions/subagents-bridge/`, run `npm install` in the checkout and reload Pi.
+
+### Duplicate subagent registrations
+
+In any scope where `pi-mobius` is active, it should be the single owner of subagent registration. A separate install of `npm:@tintinweb/pi-subagents` in the same scope can cause duplicate `Agent`, `get_subagent_result`, `steer_subagent`, or `/agents` registrations.
+
+Preferred fix order:
+
+1. Keep `pi-mobius` as the active subagent integration
+2. Remove the standalone `npm:@tintinweb/pi-subagents` package from that scope
+3. If needed, shadow that package in the active scope by disabling its extensions
+
+Example:
 
 ```json
 {
@@ -220,8 +215,14 @@ Project-level shadow example:
 }
 ```
 
-That shadow pattern matches this repo's own `.pi/settings.json`: it keeps `pi-mobius` active while preventing duplicate subagent registrations inside this repo.
+## Development notes
 
-## Maintainer validation checklist
+For local development inside this repo:
 
-See `docs/install.md` for the full install matrix, clean-room validation flow, and duplicate-subagent troubleshooting checklist.
+```bash
+npm install
+```
+
+This repo also ships a local `.pi/settings.json` that points back to `..` and selects `opencode-nord`, so opening Pi inside this repo works after dependencies are installed.
+
+For the full install matrix and maintainer validation checklist, see [`docs/install.md`](docs/install.md).
