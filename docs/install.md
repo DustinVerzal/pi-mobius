@@ -24,6 +24,30 @@ That distinction matters here because `extensions/subagents-bridge/index.ts` imp
 - **When is `npm install` required?** Whenever `pi-mobius` is loaded from a local checkout or local path.
 - **Do users need to install the subagent extension separately?** No. `pi-mobius` already owns the subagent integration through `extensions/subagents-bridge/`.
 
+## Bootstrap utility for the full ecosystem
+
+This repo also ships a convenience installer for the broader Pi package stack currently used alongside `pi-mobius`:
+
+- `pi-mobius`
+- `npm:pi-tool-display`
+- `npm:pi-context`
+- `npm:pi-web-access`
+- `npm:pi-mcp-adapter`
+
+It runs `npm install` for a local `pi-mobius` checkout when needed, installs each package with `pi install`, and then patches Pi settings with the repo's shared UI defaults (`opencode-nord`, `quietStartup`, `collapseChangelog`, and related display tweaks).
+
+Examples:
+
+```bash
+npm install
+npm run install:ecosystem
+npm run install:ecosystem -- --dry-run
+npm run install:ecosystem -- --scope local --project /path/to/consumer-project
+npm run install:ecosystem -- --self-source <PUBLISHED_GIT_URL>
+```
+
+The installer intentionally does **not** modify model/provider configuration or API-key setup.
+
 ## Supported install matrix
 
 | Scenario | Command pattern | Manual `npm install` required? | Expected package location | Expected result |

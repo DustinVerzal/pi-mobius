@@ -155,7 +155,7 @@ class ApprovalReviewComponent implements Component {
 
     const lines: string[] = [
       this.theme.fg("border", "╭") + padAnsi(this.theme.bold(this.theme.fg("warning", ` ${this.title} `)), innerWidth) + this.theme.fg("border", "╮"),
-      this.theme.fg("border", "│") + padAnsi(this.theme.fg("muted", "Scrollable review keeps the transcript readable while exposing the full plan."), innerWidth) + this.theme.fg("border", "│"),
+      this.theme.fg("border", "│") + padAnsi(this.theme.fg("muted", "Scrollable review keeps the transcript readable while exposing the plan and operating envelope."), innerWidth) + this.theme.fg("border", "│"),
       this.theme.fg("border", "│") + padAnsi(`${topOverflow}${this.theme.fg("dim", " · ")}${position}`, innerWidth) + this.theme.fg("border", "│"),
       this.theme.fg("border", "├") + this.theme.fg("border", "─".repeat(innerWidth)) + this.theme.fg("border", "┤"),
     ];

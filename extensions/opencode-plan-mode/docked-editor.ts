@@ -1,7 +1,7 @@
 import { CustomEditor } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, type Component, type OverlayHandle, type TUI } from "@mariozechner/pi-tui";
 import {
-  getDockedSidebarLayout,
+  getPlanWorkflowPresentation,
   renderPlanSidebar,
   type PlanSidebarViewModel,
   type SidebarTheme,
@@ -15,6 +15,10 @@ function getRailMaxLines(rows: number): number {
   const available = Math.max(8, rows - 4);
   const preferred = Math.min(RAIL_MAX_LINES, Math.max(8, Math.floor(rows * RAIL_MAX_HEIGHT_RATIO)));
   return Math.max(Math.min(RAIL_MIN_LINES, available), Math.min(preferred, available));
+}
+
+function getSidebarStateSignature(state: PlanSidebarViewModel | undefined): string {
+  return JSON.stringify(state ?? null);
 }
 
 class WorkflowRailOverlay implements Component {
@@ -34,6 +38,7 @@ class WorkflowRailOverlay implements Component {
 
 export class DockedPlanModeEditor extends CustomEditor {
   private sidebarState: PlanSidebarViewModel | undefined;
+  private sidebarStateSignature = getSidebarStateSignature(undefined);
   private readonly railOverlay: WorkflowRailOverlay;
   private railHandle: OverlayHandle | undefined;
   private railWidth: number | undefined;
@@ -53,11 +58,11 @@ export class DockedPlanModeEditor extends CustomEditor {
     this.railOverlay = new WorkflowRailOverlay(tui, sidebarTheme);
   }
 
-  private getPresentationKey(width = this.lastRenderWidth): string {
-    if (!this.sidebarState) return "hidden";
-    if (typeof width !== "number") return "pending";
-    const layout = getDockedSidebarLayout(width, this.sidebarState);
-    return layout ? `docked:${layout.sidebarWidth}` : `compact:${width}`;
+  private getPresentationKey(width = this.lastRenderWidth, state = this.sidebarState): string {
+    const presentation = getPlanWorkflowPresentation(width, state);
+    if (presentation.mode === "docked") return `docked:${presentation.layout.sidebarWidth}`;
+    if (presentation.mode === "compact") return `compact:${presentation.width}`;
+    return presentation.mode;
   }
 
   private notifyPresentationChange(): void {
@@ -69,43 +74,49 @@ export class DockedPlanModeEditor extends CustomEditor {
 
   private syncRail(width?: number): void {
     const resolvedWidth = typeof width === "number" ? width : this.lastRenderWidth;
-    const layout = typeof resolvedWidth === "number" ? getDockedSidebarLayout(resolvedWidth, this.sidebarState) : undefined;
+    const presentation = getPlanWorkflowPresentation(resolvedWidth, this.sidebarState);
     this.railOverlay.setModel(this.sidebarState);
 
-    if (!this.sidebarState) {
-      this.railHandle?.setHidden(true);
-      return;
-    }
-
-    if (!layout) {
-      if (typeof resolvedWidth === "number") {
+    if (presentation.mode !== "docked") {
+      if (presentation.mode !== "pending") {
         this.railHandle?.setHidden(true);
       }
       return;
     }
 
-    if (!this.railHandle || this.railWidth !== layout.sidebarWidth) {
+    if (!this.railHandle || this.railWidth !== presentation.layout.sidebarWidth) {
       this.railHandle?.hide();
       this.railHandle = this.tui.showOverlay(this.railOverlay, {
         anchor: "right-center",
-        width: layout.sidebarWidth,
+        width: presentation.layout.sidebarWidth,
         maxHeight: `${Math.round(RAIL_MAX_HEIGHT_RATIO * 100)}%`,
         margin: { top: 1, right: 1, bottom: 2 },
         nonCapturing: true,
-        visible: (termWidth) => Boolean(this.sidebarState && getDockedSidebarLayout(termWidth, this.sidebarState)),
+        visible: (termWidth) => getPlanWorkflowPresentation(termWidth, this.sidebarState).mode === "docked",
       });
-      this.railWidth = layout.sidebarWidth;
+      this.railWidth = presentation.layout.sidebarWidth;
     }
 
     this.railHandle.setHidden(false);
   }
 
   setSidebarState(state: PlanSidebarViewModel | undefined): void {
+    const nextSignature = getSidebarStateSignature(state);
+    if (nextSignature === this.sidebarStateSignature) return;
+
     this.sidebarState = state;
+    this.sidebarStateSignature = nextSignature;
     this.syncRail();
     this.notifyPresentationChange();
     this.invalidate();
     this.tui.requestRender();
+  }
+
+  getWorkflowPresentation(
+    state = this.sidebarState,
+    options?: Parameters<typeof getPlanWorkflowPresentation>[2],
+  ): ReturnType<typeof getPlanWorkflowPresentation> {
+    return getPlanWorkflowPresentation(this.lastRenderWidth, state, options);
   }
 
   getLastRenderWidth(): number | undefined {
@@ -133,5 +144,7 @@ export class DockedPlanModeEditor extends CustomEditor {
     this.railWidth = undefined;
     this.lastRenderWidth = undefined;
     this.presentationKey = undefined;
+    this.sidebarState = undefined;
+    this.sidebarStateSignature = getSidebarStateSignature(undefined);
   }
 }

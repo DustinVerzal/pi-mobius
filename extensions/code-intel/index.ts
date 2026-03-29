@@ -48,7 +48,8 @@ export default function codeIntel(pi: ExtensionAPI): void {
     promptSnippet: "Summarize the repository or a subtree into a bounded AST-backed file and symbol map.",
     promptGuidelines: [
       "Use code_intel_repo_map when you need a high-level JS/TS symbol map before reading many files.",
-      "Prefer this tool over reading many files when the task is to orient on repo structure or likely ownership of symbols.",
+      "For JS/TS exploration, prefer this tool over grep when the goal is repo orientation, likely ownership, or file shortlisting.",
+      "Do not start JS/TS subtree understanding with grep unless you need exact text matching rather than code structure.",
     ],
     parameters: repoMapParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -79,6 +80,7 @@ export default function codeIntel(pi: ExtensionAPI): void {
     promptSnippet: "Find JS/TS symbols or structural patterns with AST-backed matching and concise results.",
     promptGuidelines: [
       "Use code_intel_ast_search when grep is too text-based and you need structural or symbol-aware matching.",
+      "For JS/TS symbol or call-shape search, prefer this tool over grep unless you need an exact raw text match.",
       "Pass a simple identifier to search by symbol name, or a JS/TS pattern like pi.registerTool($$$ARGS) for structural search.",
     ],
     parameters: astSearchParams,
@@ -116,6 +118,7 @@ export default function codeIntel(pi: ExtensionAPI): void {
     promptSnippet: "Find the definition of a TS/TSX/JS symbol at a specific file position.",
     promptGuidelines: [
       "Use code_intel_definition for semantic go-to-definition on TS/TSX/JS files when a specific location is known.",
+      "Prefer this over grep when following a TypeScript symbol from a known call site or identifier location.",
     ],
     parameters: lspPositionParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -140,6 +143,7 @@ export default function codeIntel(pi: ExtensionAPI): void {
     promptSnippet: "Find semantic references for a TS/TSX/JS symbol at a specific file position.",
     promptGuidelines: [
       "Use code_intel_references when you need semantic usages of a TS/TSX/JS symbol instead of text matches.",
+      "Prefer this over grep when impact analysis depends on symbol identity rather than string matching.",
     ],
     parameters: lspPositionParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -164,6 +168,7 @@ export default function codeIntel(pi: ExtensionAPI): void {
     promptSnippet: "Get a compact semantic hover summary for a TS/TSX/JS symbol at a specific file position.",
     promptGuidelines: [
       "Use code_intel_hover for type/doc insight at a known TS/TSX/JS cursor position.",
+      "Prefer this over reading surrounding files when you only need a compact semantic summary.",
     ],
     parameters: lspPositionParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

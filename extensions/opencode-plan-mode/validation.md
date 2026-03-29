@@ -8,9 +8,8 @@ This checklist exercises the redesigned workflow end to end.
   - creates the session plan file if missing
   - shows the workflow rail on wide terminals or the compact widget/status fallback when the rail is hidden or width is narrow
 - `/plan <request>`
-  - runs prompt-master first
-  - starts a fresh planning session with the improved prompt when available
-  - falls back to the original request if extraction fails
+  - starts a fresh planning session from the provided request
+  - carries the request into the child planning session without replayable plan-only tool results
 - `Ctrl+Alt+P`
   - toggles planning mode from a normal session
   - re-primes `/plan` when approved execution is waiting
@@ -20,20 +19,26 @@ This checklist exercises the redesigned workflow end to end.
   - shows the dedicated bounded approval review overlay
   - keeps action choices visible while the plan body scrolls inside the viewport
   - supports `↑/↓` or `j/k`, `PgUp/PgDn`, `Home/End`, `Tab` or `←/→`, `Enter`, and `Esc`
-  - offers **Approve**, **Revise in editor**, and **Keep planning**
-  - blocks approval when numbered steps are malformed
+  - only offers **Approve** / **Approve and start execution** when the approval contract is complete
+  - otherwise limits the user to **Revise in editor** and **Keep planning**
+  - blocks approval when numbered steps are malformed or when required contract fields are missing
+- approval contract
+  - top-level sections must include `## Goal`, `## Success Criteria`, `## Execution Policy`, `## Re-review Triggers`, `## Files`, and `## Verification`
+  - each executable step must include `Agent`, `Batch`, `Depends on`, `Scope`, and verification intent
+  - optional `Checkpoint`, `Review gate`, and `Review reason` metadata should render cleanly in the approval summary when present
 - approved state
   - persists across interruption or session restore
   - shows `approved_waiting_execution` in the rail/widget/status surfaces
   - resumes with `/plan`, `/plan start`, or `/plan resume`
 - execution start
   - opens a fresh child session
-  - injects execution instructions with the remaining structured steps
+  - injects execution instructions with the remaining structured steps plus success criteria, scope anchors, pause conditions, execution policy, and checkpoint expectations
   - keeps the workflow summary visible through widget/status fallback until a wide rail render is available
 - approval → execution manual pass
   - reproduce `/plan` → approve-and-start or `/plan` → approve → `/plan`
   - repeat once with the rail visible and once after `/plan sidebar off`
   - exercise revise-in-editor before approval, then approve again
+  - confirm the approval summary / overlay copy surfaces success criteria, scope anchors, pause conditions, execution policy, and drift explanations without crowding out the transcript
 
 ## Runtime robustness
 - interrupted resume
@@ -51,13 +56,15 @@ This checklist exercises the redesigned workflow end to end.
   - out-of-order step numbers
   - missing dependency targets
   - dependency cycles
-- missing completion markers
+- missing or partial completion summaries
   - fallback natural-language detection updates progress
   - warning appears in the workflow surface
   - `plan_progress` can recover explicit state when needed
+  - normalized checkpoints preserve outcome / files / verification / blockers / unblock status when present, and partial checkpoints persist with warnings when some fields are missing
 - plan drift after approval
   - editing the approved plan changes the artifact signature
-  - execution warnings surface the mismatch
+  - execution warnings surface the mismatch with categorized drift reasons (goal, success criteria, scope/files, execution policy, re-review triggers, verification, or steps)
+  - users can re-review the plan and operating envelope or explicitly override
 
 ## Subagent orchestration
 - planning mode
@@ -66,7 +73,8 @@ This checklist exercises the redesigned workflow end to end.
 - execution mode
   - main agent handles obvious work directly
   - `general-purpose` subagents handle implementation work
-  - background subagents launched in parallel surface live activity and completion state in the workflow panel
+  - delegated prompts require a normalized result summary request covering outcome, files/paths, verification/tests/checks, blockers/risks/issues, and unblock status
+  - background subagents launched in parallel surface live activity, checkpoint summaries, and completion state in the workflow panel
 
 ## UI surface
 - wide terminal

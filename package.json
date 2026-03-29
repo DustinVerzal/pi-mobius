@@ -12,10 +12,16 @@
     "skills"
   ],
   "license": "MIT",
+  "scripts": {
+    "install:ecosystem": "node scripts/install-pi-mobius-ecosystem.mjs",
+    "install:ecosystem:local": "node scripts/install-pi-mobius-ecosystem.mjs --scope local",
+    "test:ecosystem": "node --test tests/install-ecosystem.test.mjs"
+  },
   "dependencies": {
     "@ast-grep/napi": "^0.42.0",
     "@ifi/oh-pi-ant-colony": "^0.3.1",
     "@tintinweb/pi-subagents": "^0.4.11",
+    "pi-interactive-shell": "^0.10.1",
     "typescript": "^5.9.2",
     "typescript-language-server": "^5.0.1",
     "vscode-languageserver-protocol": "^3.17.5"

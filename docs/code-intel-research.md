@@ -2,6 +2,8 @@
 
 _Last updated: 2026-03-22_
 
+> Historical note: this brief was written before the `code-intel` extension shipped. For current implementation facts, the explicit adopt-vs-extend decision, and what codemap support exists in `pi-mobius` today, see [`docs/codemap-gap-analysis.md`](./codemap-gap-analysis.md).
+
 ## Decision summary
 
 **Recommendation:** ship a **Pi-native `code-intel` extension** in this repo, start with **direct AST integration** for bounded repo/symbol summaries, then add a **narrow direct LSP path for one language** (default: TypeScript/TSX/JS). **Generic MCP support is out of scope for the MVP.**

@@ -1,10 +1,12 @@
 import { access } from "node:fs/promises";
 import { basename, relative, resolve } from "node:path";
+import type { SubagentChecklistItem } from "../subagents-bridge/progress.js";
 
 export type PlanMode = "normal" | "planning" | "approval_pending" | "approved_waiting_execution" | "executing";
 export type PlanStepStatus = "pending" | "blocked" | "in_progress" | "completed";
 export type ProgressSource = "done_marker" | "natural_language" | "tool";
 export type SubagentStatus = "queued" | "running" | "background" | "completed" | "failed" | "steered" | "stopped";
+export type PlanReviewGate = "pause_after" | "rereview_after";
 
 export interface PlanStep {
   step: number;
@@ -12,9 +14,13 @@ export interface PlanStep {
   agent?: string;
   batch?: number;
   dependsOn: number[];
+  scope: string[];
   verification?: string;
   rationale?: string;
   blockers?: string[];
+  checkpoint: string[];
+  reviewGate?: string;
+  reviewReason?: string;
   status: PlanStepStatus;
   completed: boolean;
   note?: string;
@@ -22,6 +28,7 @@ export interface PlanStep {
 
 export interface PlanValidation {
   errors: string[];
+  blocking: string[];
   warnings: string[];
 }
 
@@ -34,9 +41,14 @@ export interface PlanBlockedStep {
 export interface PlanExecutionHandoff {
   goal?: string;
   constraints: string[];
+  successCriteria: string[];
   blockers: string[];
   files: string[];
+  scopeAnchors: string[];
   verification: string[];
+  executionPolicy: string[];
+  pauseConditions: string[];
+  checkpointContract: string[];
   remainingSteps: number[];
   readySteps: number[];
   frontierBatch?: number;
@@ -46,6 +58,9 @@ export interface PlanExecutionHandoff {
 export interface PlanArtifact {
   goal?: string;
   context: string[];
+  successCriteria: string[];
+  executionPolicy: string[];
+  rereviewTriggers: string[];
   blockers: string[];
   openQuestions: string[];
   files: string[];
@@ -65,6 +80,14 @@ export interface PlanApprovalState {
   handoff?: PlanExecutionHandoff;
 }
 
+export interface PlanDelegationObservation {
+  status: "allowed" | "blocked";
+  reason: string;
+  stepNumbers: number[];
+  requestedAgent?: string;
+  recordedAt: string;
+}
+
 export interface PlanExecutionState {
   completedSteps: number[];
   activeStep?: number;
@@ -72,11 +95,13 @@ export interface PlanExecutionState {
   frontierStepNumbers: number[];
   frontierBatch?: number;
   blockedSteps: PlanBlockedStep[];
+  checkpoints: PlanStepCheckpoint[];
   warnings: string[];
   lastProgressAt?: string;
   lastProgressSource?: ProgressSource;
   planChangedSinceApproval?: boolean;
   requiresReapproval?: boolean;
+  lastDelegation?: PlanDelegationObservation;
 }
 
 export interface PlanSubagentActivity {
@@ -91,7 +116,11 @@ export interface PlanSubagentActivity {
   durationMs?: number;
   error?: string;
   stepNumbers?: number[];
+  stepAssociation?: string;
   normalizedSummary?: string;
+  progressItems?: SubagentChecklistItem[];
+  activeProgressItemId?: string;
+  fallbackActivity?: string;
 }
 
 export interface PlanState {
@@ -109,6 +138,23 @@ export interface PlanDrift {
   changed: boolean;
   requiresReapproval: boolean;
   reasons: string[];
+}
+
+export interface PlanCheckpointSummary {
+  outcome?: string;
+  files: string[];
+  verification: string[];
+  blockers: string[];
+  unblockStatus?: string;
+  missing: string[];
+}
+
+export interface PlanStepCheckpoint extends PlanCheckpointSummary {
+  step: number;
+  source: "assistant" | "tool" | "subagent";
+  status: "complete" | "partial";
+  rawSummary: string;
+  recordedAt: string;
 }
 
 export interface PlanSubagentPolicy {
@@ -215,6 +261,14 @@ const VAGUE_STEP_PATTERNS = [
 
 const VERIFICATION_HINT_PATTERN = /\b(?:test|verify|validation|validated?|assert|check|exercise|confirm|proof|qa|regression|smoke)\b/i;
 const MAIN_AGENT_PATTERN = /\bmain\s+session\b/i;
+const PLAN_REVIEW_GATES = new Set<PlanReviewGate>(["pause_after", "rereview_after"]);
+const DEFAULT_CHECKPOINT_CONTRACT = [
+  "Outcome: what changed for this step.",
+  "Files: the touched files, directories, or approved scope anchors.",
+  "Verification: the tests, checks, or manual proof used.",
+  "Blockers/Risks: what remains risky, blocked, or unresolved.",
+  "Unblock status: whether downstream work is now unblocked.",
+];
 
 function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -231,6 +285,76 @@ function parseTextList(text: string | undefined): string[] {
     .split(/\s*(?:,|;|\|)\s*/)
     .map((item) => item.trim())
     .filter(Boolean));
+}
+
+function parseReviewGate(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, "_");
+  return normalized || undefined;
+}
+
+function normalizeScopeAnchor(text: string): string {
+  return text.trim().replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+function isScopeAnchored(scope: string, fileAnchors: string[]): boolean {
+  const normalizedScope = normalizeScopeAnchor(scope);
+  if (!normalizedScope) return false;
+  return fileAnchors
+    .map(normalizeScopeAnchor)
+    .filter(Boolean)
+    .some((anchor) => anchor === "." || normalizedScope === anchor || normalizedScope.startsWith(`${anchor}/`));
+}
+
+function extractLabeledValue(text: string, labels: string[], stopLabels: string[]): string | undefined {
+  const labelPattern = labels.map(escapeRegex).join("|");
+  const stopPattern = stopLabels.map(escapeRegex).join("|");
+  const regex = new RegExp(`(?:^|\\b)(?:${labelPattern})\\s*:\\s*([\\s\\S]*?)(?=(?:\\b(?:${stopPattern})\\s*:)|$)`, "i");
+  const match = text.match(regex);
+  return match?.[1]?.trim();
+}
+
+function parseSummaryList(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .replace(/^[\-•]\s*/gm, "")
+    .split(/\s*(?:,|;|\|)\s*/)
+    .map((item) => item.trim().replace(/[.]+$/, ""))
+    .filter(Boolean)
+    .filter((item) => !/^none(?:\s+right\s+now)?[.!]?$/i.test(item));
+}
+
+export function normalizeCheckpointSummary(text: string): PlanCheckpointSummary {
+  const labels = {
+    outcome: ["Outcome", "Result"],
+    files: ["Files", "File", "Paths", "Path", "Touched files", "Touched paths"],
+    verification: ["Verification", "Tests", "Checks", "Proof"],
+    blockers: ["Blockers", "Blocker", "Risks", "Risk", "Issues", "Issue", "Follow-ups", "Follow-up"],
+    unblockStatus: ["Unblock status", "Unblocked", "Downstream status", "Next frontier"],
+  } as const;
+  const allLabels = Object.values(labels).flat();
+  const outcome = extractLabeledValue(text, labels.outcome, allLabels)
+    ?? (!text.includes(":") && text.trim() ? text.trim() : undefined);
+  const files = parseSummaryList(extractLabeledValue(text, labels.files, allLabels));
+  const verification = parseSummaryList(extractLabeledValue(text, labels.verification, allLabels));
+  const blockers = parseSummaryList(extractLabeledValue(text, labels.blockers, allLabels));
+  const unblockStatus = extractLabeledValue(text, labels.unblockStatus, allLabels);
+  const missing = [
+    outcome ? "" : "outcome",
+    files.length > 0 ? "" : "files",
+    verification.length > 0 ? "" : "verification",
+    blockers.length > 0 || /\bnone\b/i.test(extractLabeledValue(text, labels.blockers, allLabels) ?? "") ? "" : "blockers/risks",
+    unblockStatus ? "" : "unblock status",
+  ].filter(Boolean);
+
+  return {
+    outcome,
+    files,
+    verification,
+    blockers,
+    unblockStatus,
+    missing,
+  };
 }
 
 function getSection(markdown: string, title: string): string {
@@ -289,6 +413,9 @@ function buildPlanSignature(artifact: Omit<PlanArtifact, "signature" | "handoff"
   return [
     `goal=${artifact.goal ?? ""}`,
     `context=${artifact.context.join("|")}`,
+    `success=${artifact.successCriteria.join("|")}`,
+    `policy=${artifact.executionPolicy.join("|")}`,
+    `rereview=${artifact.rereviewTriggers.join("|")}`,
     `blockers=${artifact.blockers.join("|")}`,
     `files=${artifact.files.join("|")}`,
     `verification=${artifact.verification.join("|")}`,
@@ -298,7 +425,11 @@ function buildPlanSignature(artifact: Omit<PlanArtifact, "signature" | "handoff"
       `agent=${step.agent ?? ""}`,
       `batch=${step.batch ?? ""}`,
       `deps=${step.dependsOn.join(",")}`,
+      `scope=${step.scope.join("|")}`,
       `verify=${step.verification ?? ""}`,
+      `checkpoint=${step.checkpoint.join("|")}`,
+      `review_gate=${step.reviewGate ?? ""}`,
+      `review_reason=${step.reviewReason ?? ""}`,
       `why=${step.rationale ?? ""}`,
       `blockers=${(step.blockers ?? []).join("|")}`,
     ].join("|")),
@@ -320,15 +451,16 @@ function collectAncestors(stepNumber: number, stepMap: Map<number, PlanStep>, vi
   return ancestors;
 }
 
-function validatePlanSteps(steps: PlanStep[]): PlanValidation {
+function validatePlanSteps(steps: PlanStep[], fileAnchors: string[] = []): PlanValidation {
   const errors: string[] = [];
+  const blocking: string[] = [];
   const warnings: string[] = [];
   const seen = new Set<number>();
   let previous = 0;
 
   if (steps.length === 0) {
     errors.push("The plan needs at least one numbered step in the ## Plan section.");
-    return { errors, warnings };
+    return { errors, blocking, warnings };
   }
 
   const stepMap = new Map<number, PlanStep>(steps.map((step) => [step.step, step]));
@@ -346,19 +478,46 @@ function validatePlanSteps(steps: PlanStep[]): PlanValidation {
     previous = Math.max(previous, step.step);
 
     if (step.batch === undefined) {
-      warnings.push(`Step ${step.step} is missing Batch metadata. Add it so ready-frontier orchestration is explicit.`);
+      blocking.push(`Step ${step.step} is missing Batch metadata. Add it so ready-frontier orchestration is explicit.`);
     }
 
     if (step.agent === undefined) {
-      warnings.push(`Step ${step.step} is missing Agent metadata. Specify main session, Explore, Plan, or general-purpose.`);
+      blocking.push(`Step ${step.step} is missing Agent metadata. Specify main session, Explore, Plan, or general-purpose.`);
     }
 
     if (isVagueStepText(step.text)) {
-      warnings.push(`Step ${step.step} is vague. Name the concrete deliverable, file, or behavior to change.`);
+      blocking.push(`Step ${step.step} is vague. Name the concrete deliverable, file, or behavior to change.`);
     }
 
     if (!hasVerificationIntent(step.text) && !hasVerificationIntent(step.verification)) {
-      warnings.push(`Step ${step.step} does not say how completion will be verified. Add verification intent in the step text or Verification metadata.`);
+      blocking.push(`Step ${step.step} does not say how completion will be verified. Add verification intent in the step text or Verification metadata.`);
+    }
+
+    if ((step.scope?.length ?? 0) === 0) {
+      blocking.push(`Step ${step.step} is missing Scope metadata. Anchor it to the approved files or directories for this step.`);
+    }
+
+    if ((step.scope?.length ?? 0) > 0 && fileAnchors.length > 0) {
+      const unanchored = step.scope.filter((scope) => !isScopeAnchored(scope, fileAnchors));
+      if (unanchored.length > 0) {
+        blocking.push(`Step ${step.step} scope is outside ## Files: ${unanchored.join(", ")}. Add or adjust the approved file anchors first.`);
+      }
+    }
+
+    if ((step.checkpoint?.length ?? 0) === 0) {
+      warnings.push(`Step ${step.step} is missing Checkpoint metadata. Add the step-specific completion summary emphasis if downstream work depends on it.`);
+    }
+
+    if (step.reviewGate && !PLAN_REVIEW_GATES.has(step.reviewGate as PlanReviewGate)) {
+      errors.push(`Step ${step.step} has an invalid Review gate: ${step.reviewGate}. Use pause_after or rereview_after.`);
+    }
+
+    if (step.reviewGate && !step.reviewReason?.trim()) {
+      blocking.push(`Step ${step.step} sets Review gate=${step.reviewGate} but is missing Review reason.`);
+    }
+
+    if (!step.reviewGate && step.reviewReason?.trim()) {
+      blocking.push(`Step ${step.step} has a Review reason but no Review gate. Add pause_after or rereview_after.`);
     }
 
     for (const dependency of step.dependsOn) {
@@ -442,29 +601,39 @@ function validatePlanSteps(steps: PlanStep[]): PlanValidation {
 
   return {
     errors: uniqueNames(errors),
+    blocking: uniqueNames(blocking),
     warnings: uniqueNames(warnings),
   };
 }
 
 function validateArtifactReadiness(artifact: Omit<PlanArtifact, "signature" | "handoff">): PlanValidation {
-  const base = validatePlanSteps(artifact.steps);
+  const base = validatePlanSteps(artifact.steps, artifact.files);
+  const blocking = [...base.blocking];
   const warnings = [...base.warnings];
 
   if (!artifact.goal?.trim()) {
-    warnings.push("Capture the execution goal in ## Goal so approval and handoff have a clear target.");
+    blocking.push("Capture the execution goal in ## Goal so approval and handoff have a clear target.");
   }
   if (artifact.context.length === 0) {
     warnings.push("Add a ## Context section with relevant code paths, constraints, or prior decisions.");
   }
-  if (artifact.files.length === 0) {
-    warnings.push("List the expected files of interest in ## Files so review and execution start from the same scope.");
+  if (artifact.successCriteria.length === 0) {
+    blocking.push("Add a ## Success Criteria section so approval captures the done contract, not just the task list.");
   }
-  const hasVerification = artifact.verification.length > 0 || artifact.steps.some((step) => hasVerificationIntent(step.text) || hasVerificationIntent(step.verification));
-  if (!hasVerification) {
-    warnings.push("Add a ## Verification section or step-level verification metadata so approval can confirm the exit criteria.");
+  if (artifact.files.length === 0) {
+    blocking.push("List the approved file or directory anchors in ## Files so review and execution start from the same scope.");
+  }
+  if (artifact.executionPolicy.length === 0) {
+    blocking.push("Add a ## Execution Policy section that states the operating envelope and summary/checkpoint expectations.");
+  }
+  if (artifact.rereviewTriggers.length === 0) {
+    blocking.push("Add a ## Re-review Triggers section that names when execution must pause or return for human review.");
+  }
+  if (artifact.verification.length === 0) {
+    blocking.push("Add a ## Verification section so approval carries explicit proof obligations for the final result.");
   }
 
-  return { errors: base.errors, warnings: uniqueNames(warnings) };
+  return { errors: base.errors, blocking: uniqueNames(blocking), warnings: uniqueNames(warnings) };
 }
 
 function deriveStepStatus(step: PlanStep, stepMap: Map<number, PlanStep>): PlanStepStatus {
@@ -506,9 +675,113 @@ export function toProjectRelative(path: string, cwd: string): string {
   return rel.startsWith(".") ? rel : `./${rel}`;
 }
 
+export function buildPlanningKickoffPrompt(request: string): string {
+  const originalRequest = request.trim() || request;
+  return `Create the implementation plan for the request below. This is a planning-only kickoff for a fresh session; do not execute code changes yet.
+
+Concrete goal:
+- Produce a high-quality implementation plan for the exact request below.
+- Preserve the user's request verbatim and plan only within its intended scope.
+
+Original request (verbatim):
+<<<ORIGINAL_REQUEST
+${originalRequest}
+ORIGINAL_REQUEST>>>
+
+Expected plan output contract:
+- Write the plan into the session plan file using the required plan template/sections.
+- Make the plan concrete enough that execution can start without reinterpretation.
+- Include a dependency-aware numbered step list with explicit Agent, Batch, Depends on, Scope, and Verification metadata for each step.
+- Make parallel-ready work explicit with same-batch steps only when they are independently runnable.
+
+Scope and files:
+- Inspect the repo enough to identify the concrete files/directories likely involved.
+- Record those anchors in ## Files and keep each step Scope aligned to them.
+- If scope is unclear, resolve it through planning discovery and document the approved anchors instead of leaving vague placeholders.
+
+Verification expectations:
+- Capture both focused per-step verification and the final verification needed to prove the request is done.
+- Name tests, checks, or manual proof obligations wherever possible.
+
+Approval envelope and handoff expectations:
+- Keep ## Success Criteria, ## Execution Policy, ## Re-review Triggers, ## Files, ## Verification, ## Blockers, and ## Open Questions current for approval.
+- Call out dependencies, blockers, risks, and pause/re-review points needed for safe execution.
+- When the plan and approval envelope are ready, call plan_exit to trigger review/approval. Do not start execution yourself.`;
+}
+
 export function createPlanTemplate(goal?: string): string {
   const goalLine = goal?.trim() ? `- ${goal.trim()}\n` : "- Capture the approved execution plan for this session.\n";
-  return `# Implementation Plan\n\n## Goal\n${goalLine}## Context\n- Summarize the relevant code paths, constraints, and decisions already made.\n- Call out any risks, unknowns, or dependencies that shape execution.\n\n## Plan\n1. Inspect the concrete code paths and define the first execution-ready deliverable.\n   - Agent: main session\n   - Batch: 1\n   - Depends on: none\n   - Verification: Confirm the target files, hooks, and constraints before implementation.\n   - Why: Establish scope before changing behavior.\n2. Implement the primary change set and note any safe parallel follow-up work.\n   - Agent: main session\n   - Batch: 2\n   - Depends on: 1\n   - Verification: Name the focused checks, tests, or manual proof for this change.\n   - Why: Turn the scoped plan into concrete code changes.\n3. Validate the result, edge cases, and execution handoff expectations.\n   - Agent: main session\n   - Batch: 3\n   - Depends on: 1, 2\n   - Verification: Run or describe the final proof that the workflow is complete.\n   - Why: Close the loop before execution approval.\n\n## Blockers\n- None right now.\n\n## Files\n- path/to/file\n\n## Verification\n- Run focused checks and relevant tests.\n- Validate the end-to-end behavior after implementation.\n\n## Open Questions\n- None right now.\n`;
+  return `# Implementation Plan
+
+## Goal
+${goalLine}## Context
+- Summarize the relevant code paths, constraints, and decisions already made.
+- Call out any risks, unknowns, or dependencies that shape execution.
+
+## Success Criteria
+- Describe the user-visible or repo-visible outcomes that must be true when execution is done.
+- Keep these criteria distinct from the tests or checks used to verify them.
+
+## Plan
+1. Inspect the concrete code paths, confirm the ready frontier, and capture any discovery needed before implementation.
+   - Agent: Explore
+   - Batch: 1
+   - Depends on: none
+   - Scope: path/to/file, path/to/tests
+   - Verification: Confirm the target files, hooks, and constraints before implementation.
+   - Checkpoint: outcome, files, verification, blockers/risks, unblock status
+   - Why: Establish scope before changing behavior.
+2. Implement the primary change set for the first independent slice.
+   - Agent: general-purpose
+   - Batch: 2
+   - Depends on: 1
+   - Scope: path/to/file
+   - Verification: Name the focused checks, tests, or manual proof for this slice.
+   - Checkpoint: outcome, files, verification, blockers/risks, unblock status
+   - Why: Turn the scoped plan into concrete code changes.
+3. Implement any same-frontier follow-up slice that can safely run in parallel with step 2.
+   - Agent: general-purpose
+   - Batch: 2
+   - Depends on: 1
+   - Scope: path/to/tests
+   - Verification: Confirm the files touched and the proof for this parallel-ready slice.
+   - Checkpoint: outcome, files, verification, blockers/risks, unblock status
+   - Review gate: pause_after
+   - Review reason: Pause before fan-in if this slice expands scope or changes execution risk.
+   - Why: Make same-batch parallel work explicit when it exists.
+4. Synthesize the fan-in, validate the result, and capture execution handoff expectations.
+   - Agent: main session
+   - Batch: 3
+   - Depends on: 2, 3
+   - Scope: path/to/file, path/to/tests
+   - Verification: Run or describe the final proof that the workflow is complete.
+   - Checkpoint: outcome, files, verification, blockers/risks, unblock status
+   - Why: Close the loop after same-batch work is merged back together.
+
+## Execution Policy
+- Stay within the listed files and step scope anchors unless a human approves broader scope.
+- Pause for human review before destructive commands, dependency changes, migrations, or other high-risk actions.
+- Completion updates must summarize outcome, files touched, verification, blockers/risks, and whether downstream work is unblocked.
+
+## Re-review Triggers
+- A change touches files or directories outside ## Files or the active step Scope.
+- The plan contract, success criteria, or execution policy changes after approval.
+- Execution needs destructive commands, dependency changes, schema/data migrations, or secrets/production access.
+
+## Blockers
+- None right now.
+
+## Files
+- path/to/file
+- path/to/tests
+
+## Verification
+- Run focused checks and relevant tests.
+- Validate the end-to-end behavior after implementation.
+
+## Open Questions
+- None right now.
+`;
 }
 
 export function cleanStepText(text: string): string {
@@ -541,15 +814,21 @@ export function extractPlanSteps(markdown: string, previousSteps: PlanStep[] = [
       metadata.set(match[1].trim().toLowerCase(), match[2].trim());
     }
 
+    const scope = parseTextList(metadata.get("scope"));
+    const checkpoint = parseTextList(metadata.get("checkpoint"));
     steps.push({
       step: currentStep,
       text: cleanStepText(currentText),
       agent: metadata.get("agent") ?? previous?.agent,
       batch: parseBatch(metadata.get("batch")) ?? previous?.batch,
       dependsOn: parseDependsOn(metadata.get("depends on")) ?? previous?.dependsOn ?? [],
+      scope: scope.length > 0 ? scope : previous?.scope ?? [],
       verification: metadata.get("verification") ?? previous?.verification,
       rationale: metadata.get("why") ?? metadata.get("rationale") ?? previous?.rationale,
       blockers: parseTextList(metadata.get("blockers")).length > 0 ? parseTextList(metadata.get("blockers")) : previous?.blockers,
+      checkpoint: checkpoint.length > 0 ? checkpoint : previous?.checkpoint ?? [],
+      reviewGate: parseReviewGate(metadata.get("review gate")) ?? previous?.reviewGate,
+      reviewReason: metadata.get("review reason") ?? previous?.reviewReason,
       status: previous?.status ?? "pending",
       completed: previous?.completed ?? false,
       note: previous?.note,
@@ -596,6 +875,9 @@ export function normalizePlanArtifact(artifact: Omit<PlanArtifact, "signature" |
 export function extractPlanArtifact(markdown: string, previousSteps: PlanStep[] = []): PlanArtifact {
   const goalSection = getSection(markdown, "Goal");
   const contextSection = getSection(markdown, "Context");
+  const successCriteriaSection = getSection(markdown, "Success Criteria");
+  const executionPolicySection = getSection(markdown, "Execution Policy");
+  const rereviewTriggersSection = getSection(markdown, "Re-review Triggers");
   const filesSection = getSection(markdown, "Files");
   const verificationSection = getSection(markdown, "Verification");
   const openQuestionsSection = getSection(markdown, "Open Questions");
@@ -603,12 +885,15 @@ export function extractPlanArtifact(markdown: string, previousSteps: PlanStep[] 
   const artifact = normalizePlanArtifact({
     goal: extractBulletItems(goalSection)[0] ?? extractParagraph(goalSection),
     context: extractBulletItems(contextSection),
+    successCriteria: extractBulletItems(successCriteriaSection),
+    executionPolicy: extractBulletItems(executionPolicySection),
+    rereviewTriggers: extractBulletItems(rereviewTriggersSection),
     blockers: extractBulletItems(blockersSection),
     openQuestions: extractBulletItems(openQuestionsSection),
     files: extractBulletItems(filesSection),
     verification: extractBulletItems(verificationSection),
     steps: extractPlanSteps(markdown, previousSteps),
-    validation: { errors: [], warnings: [] },
+    validation: { errors: [], blocking: [], warnings: [] },
   });
   return artifact;
 }
@@ -650,10 +935,21 @@ export function findCurrentStep(steps: PlanStep[]): PlanStep | undefined {
   return getExecutionFrontier(steps)[0];
 }
 
-export function buildExecutionHandoff(artifact: Pick<PlanArtifact, "goal" | "context" | "blockers" | "files" | "verification" | "steps">): PlanExecutionHandoff {
+export function buildExecutionHandoff(artifact: Pick<PlanArtifact, "goal" | "context" | "successCriteria" | "executionPolicy" | "rereviewTriggers" | "blockers" | "files" | "verification" | "steps">): PlanExecutionHandoff {
   const frontier = getExecutionFrontier(artifact.steps);
   const blocked = getBlockedSteps(artifact.steps);
   const frontierPolicies = frontier.map((step) => deriveSubagentPolicy(step, frontier.length));
+  const frontierScopeAnchors = uniqueNames(frontier.flatMap((step) => step.scope ?? []));
+  const frontierPauseConditions = uniqueNames([
+    ...artifact.rereviewTriggers,
+    ...frontier
+      .filter((step) => step.reviewGate)
+      .map((step) => `Step ${step.step}: ${step.reviewGate}${step.reviewReason ? ` — ${step.reviewReason}` : ""}`),
+  ]);
+  const checkpointContract = uniqueNames([
+    ...DEFAULT_CHECKPOINT_CONTRACT,
+    ...frontier.flatMap((step) => step.checkpoint ?? []),
+  ]);
   const delegationGuidance = uniqueNames([
     ...frontierPolicies.flatMap((policy) => [`Prefer ${policy.preferredAgent} for the current frontier.`, ...policy.resultContract]),
     frontier.length > 1
@@ -664,20 +960,40 @@ export function buildExecutionHandoff(artifact: Pick<PlanArtifact, "goal" | "con
   return {
     goal: artifact.goal,
     constraints: artifact.context,
+    successCriteria: artifact.successCriteria,
     blockers: uniqueNames([
       ...artifact.blockers,
       ...blocked.map((item) => `Step ${item.step}: ${item.reason}`),
     ]),
     files: artifact.files,
+    scopeAnchors: frontierScopeAnchors.length > 0 ? frontierScopeAnchors : artifact.files,
     verification: uniqueNames([
       ...artifact.verification,
       ...frontier.map((step) => step.verification).filter((value): value is string => Boolean(value?.trim())),
     ]),
+    executionPolicy: artifact.executionPolicy,
+    pauseConditions: frontierPauseConditions,
+    checkpointContract,
     remainingSteps: artifact.steps.filter((step) => !step.completed).map((step) => step.step),
     readySteps: frontier.map((step) => step.step),
     frontierBatch: frontier[0]?.batch,
     delegationGuidance,
   };
+}
+
+function parseSignatureEntries(signature: string): Map<string, string> {
+  const entries = new Map<string, string>();
+  for (const line of signature.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+    const stepMatch = line.match(/^(\d+):/);
+    if (stepMatch) {
+      entries.set(`step:${stepMatch[1]}`, line);
+      continue;
+    }
+    const separator = line.indexOf("=");
+    if (separator <= 0) continue;
+    entries.set(line.slice(0, separator), line.slice(separator + 1));
+  }
+  return entries;
 }
 
 export function detectPlanDrift(artifact: PlanArtifact | undefined, approvedSignature?: string): PlanDrift {
@@ -687,13 +1003,29 @@ export function detectPlanDrift(artifact: PlanArtifact | undefined, approvedSign
   if (artifact.signature === approvedSignature) {
     return { changed: false, requiresReapproval: false, reasons: [] };
   }
+
+  const current = parseSignatureEntries(artifact.signature);
+  const approved = parseSignatureEntries(approvedSignature);
+  const changedSteps = uniqueNames([
+    ...[...current.keys()].filter((key) => key.startsWith("step:") && current.get(key) !== approved.get(key)).map((key) => key.replace("step:", "")),
+    ...[...approved.keys()].filter((key) => key.startsWith("step:") && current.get(key) !== approved.get(key)).map((key) => key.replace("step:", "")),
+  ]).map((value) => Number(value)).filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+
+  const reasons = uniqueNames([
+    current.get("goal") !== approved.get("goal") ? "The execution goal changed after approval." : "",
+    current.get("success") !== approved.get("success") ? "The success criteria changed after approval." : "",
+    current.get("files") !== approved.get("files") ? "The approved file/scope anchors changed after approval." : "",
+    current.get("policy") !== approved.get("policy") ? "The execution policy changed after approval." : "",
+    current.get("rereview") !== approved.get("rereview") ? "The pause or re-review triggers changed after approval." : "",
+    current.get("verification") !== approved.get("verification") ? "The verification contract changed after approval." : "",
+    changedSteps.length > 0 ? `Plan steps changed after approval: ${changedSteps.join(", ")}.` : "",
+    "Re-review the plan or explicitly override before continuing execution.",
+  ]);
+
   return {
     changed: true,
     requiresReapproval: true,
-    reasons: [
-      "The approved execution contract changed after approval.",
-      "Re-review the plan or explicitly override before continuing execution.",
-    ],
+    reasons,
   };
 }
 
@@ -701,6 +1033,7 @@ export function deriveExecutionWarnings(artifact: PlanArtifact | undefined, appr
   const warnings = [...existingWarnings];
   if (!artifact) return uniqueNames(warnings);
 
+  warnings.push(...artifact.validation.blocking.map((item) => `Approval blocker: ${item}`));
   warnings.push(...artifact.validation.warnings);
   const drift = detectPlanDrift(artifact, approvedSignature);
   warnings.push(...drift.reasons);
@@ -822,8 +1155,15 @@ export function isSafeReadOnlyCommand(command: string): boolean {
   return safe && !destructive;
 }
 
+const PLAN_ONLY_TOOL_NAMES = new Set(["question", "plan_enter", "plan_exit", "plan_progress"]);
+const PROMPT_MASTER_TOOL_NAMES = new Set(["prompt_improve"]);
+
 export function stripPlanOnlyTools(names: string[]): string[] {
-  return names.filter((name) => !new Set(["question", "plan_exit", "plan_progress"]).has(name));
+  return names.filter((name) => !PLAN_ONLY_TOOL_NAMES.has(name));
+}
+
+export function stripPromptMasterTools(names: string[]): string[] {
+  return names.filter((name) => !PROMPT_MASTER_TOOL_NAMES.has(name));
 }
 
 export function uniqueNames(names: string[]): string[] {
@@ -832,7 +1172,7 @@ export function uniqueNames(names: string[]): string[] {
 
 export function normalizeAgentPreference(agent: string | undefined): string {
   const normalized = agent?.trim() ?? "";
-  if (!normalized) return "main session";
+  if (!normalized) return "general-purpose";
   if (/^general-purpose$/i.test(normalized)) return "general-purpose";
   if (/^explore$/i.test(normalized)) return "Explore";
   if (/^plan$/i.test(normalized)) return "Plan";
@@ -851,7 +1191,7 @@ export function deriveSubagentPolicy(step: PlanStep, frontierSize = 1): PlanSuba
     isolation: writeCapable && frontierSize > 1 ? "worktree" : undefined,
     resultContract: [
       `Reference step ${step.step} in the description/prompt for delegated work.`,
-      "Return a concise normalized summary with: outcome, files touched, verification, and blockers/risks.",
+      "Return a concise normalized summary with: outcome, files touched, verification, blockers/risks, and unblock status.",
       "Do not advance dependent steps until delegated results are synthesized back into the main flow.",
     ],
   };
@@ -875,13 +1215,31 @@ export function planInstructions(planPath: string, cwd: string, hasSubagentTool:
   const relativePlanPath = toProjectRelative(planPath, cwd);
   const subagentNote = hasSubagentTool
     ? [
-      "- Use the main agent first for small or obvious planning work.",
-      "- If you delegate, use Explore only for codebase discovery/evidence gathering.",
+      "- Choose Agent metadata deliberately instead of defaulting every step to main session.",
+      "- Use general-purpose for most implementation or write-capable execution work.",
+      "- Use Explore only for codebase discovery/evidence gathering.",
       "- Use Plan only for architecture trade-offs or synthesis.",
-      "- Do not assume every step should say Agent: Explore.",
+      "- Use main session for tightly-coupled edits, final fan-in, or tiny changes that would add more delegation friction than value.",
     ].join("\n") + "\n"
     : "";
-  return `You are in plan mode.\n\nRules:\n- Read and inspect freely.\n- Only modify the plan file at ${relativePlanPath}.\n- Do not edit any other file.\n- Use read-only bash commands only.\n${subagentNote}Write the approved plan into ${relativePlanPath}.\n- The numbered steps are the execution contract; make them concrete, dependency-aware, and ready to execute without reinterpretation.\n- Every step should state a real deliverable, Agent, Batch, Depends on, and how completion will be verified (either in the text or Verification metadata).\n- Use Batch to mark the concurrency frontier: steps in the same batch must be independently runnable and must not depend on each other.\n- Explain blocker/dependency rationale when it matters for approval.\n- Keep ## Context, ## Files, ## Verification, and ## Blockers current so approval has enough evidence.\n- When the plan is ready for approval, call the plan_exit tool.\n- Use [DONE:n] markers only after execution starts, not while planning.`;
+  return `You are in plan mode.
+
+Rules:
+- Read and inspect freely.
+- Only modify the plan file at ${relativePlanPath}.
+- Do not edit any other file.
+- Use read-only bash commands only.
+${subagentNote}Write the approved plan into ${relativePlanPath}.
+- The numbered steps are the execution contract; make them concrete, dependency-aware, and ready to execute without reinterpretation.
+- Every step should state a real deliverable, Agent, Batch, Depends on, Scope, and how completion will be verified (either in the text or Verification metadata).
+- Add Checkpoint metadata when the step needs a specific completion-summary emphasis, and use Review gate / Review reason for steps that must pause or return for human review.
+- Plan by dependency frontier: use Batch to show what becomes ready together, and keep same-batch steps independently runnable with no dependency edges between them.
+- When multiple steps are ready in the same batch, make the parallel fan-out/fan-in explicit so execution can delegate them together and synthesize results before unlocking downstream work.
+- Preserve safety boundaries in the plan: Explore and Plan stay read-only, while write-capable implementation should stay in main session or general-purpose execution steps.
+- Explain blocker/dependency rationale when it matters for approval.
+- Keep ## Success Criteria, ## Execution Policy, ## Re-review Triggers, ## Files, and ## Verification current so approval captures both the plan and the operating envelope.
+- When the plan is ready for approval, call the plan_exit tool.
+- Use [DONE:n] markers only after execution starts, not while planning.`;
 }
 
 export function formatStepForExecution(step: PlanStep): string {
@@ -889,12 +1247,15 @@ export function formatStepForExecution(step: PlanStep): string {
   if (step.agent) metadata.push(`agent=${step.agent}`);
   if (typeof step.batch === "number") metadata.push(`batch=${step.batch}`);
   if (step.dependsOn.length > 0) metadata.push(`depends_on=${step.dependsOn.join(",")}`);
+  if (step.scope.length > 0) metadata.push(`scope=${step.scope.join(", ")}`);
   if (step.verification) metadata.push(`verify=${step.verification}`);
   return `${step.step}. ${step.text}${metadata.length > 0 ? ` (${metadata.join(" • ")})` : ""}`;
 }
 
 function formatStepForApproval(step: PlanStep): string[] {
   const lines = [`  ${formatStepForExecution(step)}`];
+  if (step.checkpoint.length > 0) lines.push(`    - checkpoint: ${step.checkpoint.join("; ")}`);
+  if (step.reviewGate) lines.push(`    - review gate: ${step.reviewGate}${step.reviewReason ? ` — ${step.reviewReason}` : ""}`);
   if (step.rationale) lines.push(`    - why: ${step.rationale}`);
   if (step.blockers && step.blockers.length > 0) lines.push(`    - blockers: ${step.blockers.join("; ")}`);
   return lines;
@@ -908,10 +1269,14 @@ export function executionInstructions(planPath: string, cwd: string, artifact?: 
   const blocked = getBlockedSteps(steps);
   const checklist = remaining.length > 0 ? remaining.map(formatStepForExecution).join("\n") : "- No remaining steps recorded.";
   const readyNow = frontier.length > 0 ? frontier.map(formatStepForExecution).join("\n") : "- No ready steps. Investigate blockers or update plan progress.";
-  const warnings = artifact?.validation.warnings.length ? `\nPlan warnings:\n- ${artifact.validation.warnings.join("\n- ")}\n` : "";
+  const validationItems = [
+    ...(artifact?.validation.blocking ?? []).map((item) => `Approval blocker: ${item}`),
+    ...(artifact?.validation.warnings ?? []).map((item) => `Warning: ${item}`),
+  ];
+  const warnings = validationItems.length > 0 ? `\nPlan warnings:\n- ${validationItems.join("\n- ")}\n` : "";
   const handoff = artifact?.handoff;
   const handoffBlock = handoff
-    ? `\nExecution handoff:\n- Goal: ${handoff.goal ?? "(not captured)"}\n- Constraints: ${handoff.constraints.length > 0 ? handoff.constraints.join(" | ") : "none recorded"}\n- Files: ${handoff.files.length > 0 ? handoff.files.join(", ") : "none listed"}\n- Verification: ${handoff.verification.length > 0 ? handoff.verification.join(" | ") : "none recorded"}\n- Blockers: ${handoff.blockers.length > 0 ? handoff.blockers.join(" | ") : "none"}\n`
+    ? `\nExecution handoff:\n- Goal: ${handoff.goal ?? "(not captured)"}\n- Constraints: ${handoff.constraints.length > 0 ? handoff.constraints.join(" | ") : "none recorded"}\n- Success criteria: ${handoff.successCriteria.length > 0 ? handoff.successCriteria.join(" | ") : "none recorded"}\n- Scope anchors: ${handoff.scopeAnchors.length > 0 ? handoff.scopeAnchors.join(" | ") : "none recorded"}\n- Verification: ${handoff.verification.length > 0 ? handoff.verification.join(" | ") : "none recorded"}\n- Execution policy: ${handoff.executionPolicy.length > 0 ? handoff.executionPolicy.join(" | ") : "none recorded"}\n- Pause conditions: ${handoff.pauseConditions.length > 0 ? handoff.pauseConditions.join(" | ") : "none recorded"}\n- Checkpoint contract: ${handoff.checkpointContract.join(" | ")}\n- Blockers: ${handoff.blockers.length > 0 ? handoff.blockers.join(" | ") : "none"}\n`
     : "";
   const blockedBlock = blocked.length > 0 ? `Blocked steps:\n- ${blocked.map((item) => `Step ${item.step}: ${item.reason}`).join("\n- ")}\n` : "";
   const policyLines = frontier.map((step) => {
@@ -925,15 +1290,42 @@ export function executionInstructions(planPath: string, cwd: string, artifact?: 
     return `- ${guidance}`;
   }).join("\n");
   const policyBlock = frontier.length > 0
-    ? `Subagent policy for the current frontier:\n${policyLines}\n- Delegated work must reference its step number(s) and return outcome/files/verification/blockers before downstream steps proceed.\n- If multiple write-capable tasks run in parallel, prefer general-purpose background subagents with isolation: worktree and grouped fan-in.\n- Retry or escalate failed delegated work before advancing dependent steps.\n`
+    ? `Subagent policy for the current frontier:
+${policyLines}
+- Delegated work must reference its step number(s) and return outcome/files/verification/blockers/unblock status before downstream steps proceed.
+- If multiple write-capable tasks run in parallel, prefer general-purpose background subagents with isolation: worktree and grouped fan-in.
+- Retry or escalate failed delegated work before advancing dependent steps.
+`
     : "";
 
-  return `Execution mode is active.\n\nApproved plan file: ${relativePlanPath}\n\nReady frontier:\n${readyNow}\n\nRemaining steps:\n${checklist}\n\n${blockedBlock}${warnings}${handoffBlock}${policyBlock}Execution guidance:\n- Execute the plan by dependency frontier, not just a single active step.\n- Prefer the main agent first for obvious or tightly-coupled edits.\n- Use Explore only for discovery/evidence gathering.\n- Use Plan only when you need architecture comparison or synthesis.\n- Use general-purpose subagents for most implementation work.\n- When the ready frontier has multiple independent steps, fan out delegated work in parallel, wait for results, normalize/summarize them back into the main flow, then move to the next frontier.\n- Emit [DONE:n] markers in normal assistant messages as each numbered step completes.\n- If you already finished a step but forgot a marker, call plan_progress for that step immediately, then keep going.`;
+  return `Execution mode is active.
+
+Approved plan file: ${relativePlanPath}
+
+Ready frontier:
+${readyNow}
+
+Remaining steps:
+${checklist}
+
+${blockedBlock}${warnings}${handoffBlock}${policyBlock}Execution guidance:
+- Start from the current ready frontier, not just the next single unfinished step in plan order.
+- Use main session for tightly-coupled edits, tiny fixes, or final fan-in work that would not benefit from delegation.
+- Use Explore only for discovery/evidence gathering.
+- Use Plan only when you need architecture comparison or synthesis.
+- Use general-purpose subagents for most implementation work.
+- When the ready frontier has multiple independent steps in the same batch, fan out delegated work in parallel, wait for results, normalize/summarize them back into the main flow, then move to the next frontier.
+- Keep the read-only planning boundary intact: planning/synthesis stays read-only, while execution handoff should delegate only the write-capable frontier work.
+- Emit [DONE:n] markers in normal assistant messages as each numbered step completes.
+- If you already finished a step but forgot a marker, call plan_progress for that step immediately, then keep going.`;
 }
 
 export function formatApprovalSummary(planPath: string, cwd: string, artifact?: PlanArtifact): string {
   const relativePlanPath = toProjectRelative(planPath, cwd);
   const goal = artifact?.goal ?? "No goal captured yet.";
+  const successCriteria = artifact?.successCriteria.length ? artifact.successCriteria.map((item) => `  - ${item}`).join("\n") : "  - None captured";
+  const executionPolicy = artifact?.executionPolicy.length ? artifact.executionPolicy.map((item) => `  - ${item}`).join("\n") : "  - None captured";
+  const rereviewTriggers = artifact?.rereviewTriggers.length ? artifact.rereviewTriggers.map((item) => `  - ${item}`).join("\n") : "  - None captured";
   const steps = artifact?.steps.length
     ? artifact.steps.flatMap(formatStepForApproval).join("\n")
     : "  (No numbered steps found)";
@@ -944,11 +1336,14 @@ export function formatApprovalSummary(planPath: string, cwd: string, artifact?: 
   const readyNow = artifact ? getExecutionFrontier(artifact.steps).map((step) => `  - ${formatStepForExecution(step)}`).join("\n") : "";
   const issues = [
     ...(artifact?.validation.errors ?? []).map((item) => `  - ERROR: ${item}`),
+    ...(artifact?.validation.blocking ?? []).map((item) => `  - Approval blocker: ${item}`),
     ...(artifact?.validation.warnings ?? []).map((item) => `  - Warning: ${item}`),
   ];
   const issueBlock = issues.length > 0 ? `\nValidation:\n${issues.join("\n")}` : "";
   const handoff = artifact?.handoff;
-  const handoffBlock = handoff ? `\nExecution handoff:\n  - Remaining steps: ${handoff.remainingSteps.join(", ") || "none"}\n  - Ready now: ${handoff.readySteps.join(", ") || "none"}\n  - Delegation guidance: ${handoff.delegationGuidance.join(" | ")}` : "";
+  const handoffBlock = handoff
+    ? `\nExecution handoff:\n  - Remaining steps: ${handoff.remainingSteps.join(", ") || "none"}\n  - Ready now: ${handoff.readySteps.join(", ") || "none"}\n  - Scope anchors: ${handoff.scopeAnchors.join(" | ") || "none"}\n  - Pause conditions: ${handoff.pauseConditions.join(" | ") || "none"}\n  - Delegation guidance: ${handoff.delegationGuidance.join(" | ")}`
+    : "";
 
-  return `Plan summary for ${relativePlanPath}\n\nGoal:\n  ${goal}\n\nSteps:\n${steps}\n\nFiles:\n${files}\n\nBlockers:\n${blockers}\n\nVerification:\n${verification}\n\nOpen questions:\n${questions}${readyNow ? `\n\nReady frontier:\n${readyNow}` : ""}${handoffBlock}${issueBlock}`;
+  return `Plan summary for ${relativePlanPath}\n\nGoal:\n  ${goal}\n\nSuccess criteria:\n${successCriteria}\n\nSteps:\n${steps}\n\nFiles:\n${files}\n\nExecution policy:\n${executionPolicy}\n\nRe-review triggers:\n${rereviewTriggers}\n\nBlockers:\n${blockers}\n\nVerification:\n${verification}\n\nOpen questions:\n${questions}${readyNow ? `\n\nReady frontier:\n${readyNow}` : ""}${handoffBlock}${issueBlock}`;
 }

@@ -5,16 +5,12 @@ import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Key } from "@mariozechner/pi-tui";
-import {
-  DEFAULT_PROMPT_MASTER_TARGET,
-  dispatchPromptMaster,
-  extractPromptMasterPromptFromMessage,
-} from "../prompt-master-injection/index.js";
 import { DockedPlanModeEditor } from "./docked-editor.js";
 import { showApprovalReview } from "./approval-review.js";
-import { getDockedSidebarLayout, renderPlanSidebarFallback, type PlanSidebarViewModel } from "./sidebar.js";
+import { getPlanWorkflowPresentation, renderPlanSidebarFallback, type PlanSidebarViewModel } from "./sidebar.js";
 import {
   buildExecutionHandoff,
+  buildPlanningKickoffPrompt,
   createPlanTemplate,
   deriveExecutionWarnings,
   deriveSubagentPolicy,
@@ -33,9 +29,11 @@ import {
   isSafeReadOnlyCommand,
   markCompletedSteps,
   normalizeAgentPreference,
+  normalizeCheckpointSummary,
   planInstructions,
   planPathForSession,
   stripPlanOnlyTools,
+  stripPromptMasterTools,
   toProjectRelative,
   uniqueNames,
   updateStepStatus,
@@ -69,9 +67,14 @@ interface SessionMessageEntry {
   message: AgentMessage;
 }
 
-interface PlanBootstrapResult {
-  prompt: string;
-  usedFallback: boolean;
+interface PendingDelegationIntent {
+  type: string;
+  description: string;
+  prompt?: string;
+  stepNumbers: number[];
+  requestedAgent: string;
+  stepAssociation: string;
+  recordedAt: string;
 }
 
 function createInitialState(): PlanState {
@@ -88,7 +91,33 @@ function createInitialState(): PlanState {
 }
 
 function emptyValidation(): PlanValidation {
-  return { errors: [], warnings: [] };
+  return { errors: [], blocking: [], warnings: [] };
+}
+
+interface ApprovalReviewOptions {
+  options: string[];
+  approveLabel?: string;
+  overrideRequired: boolean;
+}
+
+function getApprovalReviewOptions(validation: PlanValidation, directStart = false): ApprovalReviewOptions {
+  if (validation.errors.length > 0) {
+    return {
+      options: ["Revise in editor", "Keep planning"],
+      overrideRequired: false,
+    };
+  }
+
+  const overrideRequired = validation.blocking.length > 0;
+  const approveLabel = overrideRequired
+    ? (directStart ? "Approve and start anyway" : "Approve anyway")
+    : (directStart ? "Approve and start execution" : "Approve plan");
+
+  return {
+    options: [approveLabel, "Revise in editor", "Keep planning"],
+    approveLabel,
+    overrideRequired,
+  };
 }
 
 function isMessageEntry(entry: unknown): entry is SessionMessageEntry {
@@ -131,22 +160,15 @@ function extractTextFromUnknown(value: unknown): string {
   return "";
 }
 
-function getPromptMasterBootstrapPrompt(branch: unknown[], startIndex: number): string | undefined {
-  for (let i = branch.length - 1; i >= startIndex; i -= 1) {
-    const entry = branch[i];
-    if (!isMessageEntry(entry) || !isAssistantMessage(entry.message)) continue;
-    const extracted = extractPromptMasterPromptFromMessage(entry.message);
-    if (extracted) return extracted;
-  }
-  return undefined;
-}
-
 function isPlanAuthoringMode(mode: PlanMode): boolean {
   return mode === "planning" || mode === "approval_pending" || mode === "approved_waiting_execution";
 }
 
 function cloneSubagent(activity: PlanSubagentActivity): PlanSubagentActivity {
-  return { ...activity };
+  return {
+    ...activity,
+    progressItems: activity.progressItems?.map((item) => ({ ...item })),
+  };
 }
 
 export default function opencodePlanMode(pi: ExtensionAPI): void {
@@ -160,6 +182,13 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
   let planSyncInFlight: Promise<void> | undefined;
   let planSyncQueued = false;
   let sessionVersion = 0;
+  let lastSidebarSyncSignature: string | undefined;
+  let lastWorkflowWidgetSyncSignature: string | undefined;
+  let lastStatusSyncValue: string | undefined;
+  let hasSidebarSync = false;
+  let hasWorkflowWidgetSync = false;
+  let hasStatusSync = false;
+  let pendingDelegationIntents: PendingDelegationIntent[] = [];
 
   function getSteps(): PlanStep[] {
     return state.artifact?.steps ?? [];
@@ -182,11 +211,15 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     return uniqueNames(names);
   }
 
-  function getExecutionTools(): string[] {
+  function getWorkflowResumeTools(): string[] {
     const base = state.previousActiveTools && state.previousActiveTools.length > 0
       ? stripPlanOnlyTools(state.previousActiveTools)
       : stripPlanOnlyTools(pi.getAllTools().map((tool) => tool.name));
-    return uniqueNames([...base, PLAN_PROGRESS_TOOL_NAME]);
+    return uniqueNames(stripPromptMasterTools(base));
+  }
+
+  function getExecutionTools(): string[] {
+    return uniqueNames([...getWorkflowResumeTools(), PLAN_PROGRESS_TOOL_NAME]);
   }
 
   function persistStateNow(): void {
@@ -228,6 +261,7 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
         frontierStepNumbers: [],
         frontierBatch: undefined,
         blockedSteps: [],
+        checkpoints: [],
         warnings: [],
       };
     }
@@ -242,6 +276,7 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
         frontierStepNumbers: [],
         frontierBatch: undefined,
         blockedSteps: [],
+        checkpoints: [],
         warnings: [],
       };
       return;
@@ -263,10 +298,11 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     execution.planChangedSinceApproval = drift.changed;
     execution.requiresReapproval = drift.requiresReapproval;
 
-    if (state.artifact.validation.errors.length > 0 && state.mode !== "planning") {
+    if (state.mode !== "planning") {
       execution.warnings = uniqueNames([
         ...execution.warnings,
         ...state.artifact.validation.errors.map((error) => `Plan validation error: ${error}`),
+        ...state.artifact.validation.blocking.map((item) => `Plan approval blocker: ${item}`),
       ]);
     }
 
@@ -343,8 +379,9 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     switch (state.mode) {
       case "planning":
         if (steps.length === 0) return "Write numbered steps in the plan file.";
-        if (state.artifact?.validation.errors.length) return "Fix plan validation errors before approval.";
-        return "Call plan_exit or run /plan to review and approve this plan.";
+        if ((state.artifact?.validation.errors.length ?? 0) > 0) return "Fix plan validation errors before approval.";
+        if ((state.artifact?.validation.blocking.length ?? 0) > 0) return "Review the approval blockers or approve with override from /plan.";
+        return "Call plan_exit or run /plan to review and approve this plan and operating envelope.";
       case "approval_pending":
         return "Choose approve, revise in editor, or keep planning.";
       case "approved_waiting_execution":
@@ -385,37 +422,71 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
   }
 
   function getCompactSidebarWidth(): number {
+    if (state.panelVisible === false) return 72;
     return Math.max(48, Math.min(88, planEditor?.getLastRenderWidth() ?? 72));
+  }
+
+  function resetUiSyncState(): void {
+    lastSidebarSyncSignature = undefined;
+    lastWorkflowWidgetSyncSignature = undefined;
+    lastStatusSyncValue = undefined;
+    hasSidebarSync = false;
+    hasWorkflowWidgetSync = false;
+    hasStatusSync = false;
+  }
+
+  function getSidebarSyncSignature(model: PlanSidebarViewModel | undefined): string {
+    return JSON.stringify(model ?? null);
+  }
+
+  function syncStatus(ctx: ExtensionContext, value: string | undefined): void {
+    if (!ctx.hasUI) return;
+    if (hasStatusSync && lastStatusSyncValue === value) return;
+    lastStatusSyncValue = value;
+    hasStatusSync = true;
+    ctx.ui.setStatus("opencode-plan", value);
   }
 
   function clearWorkflowWidget(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
+    if (hasWorkflowWidgetSync && lastWorkflowWidgetSyncSignature === "clear") return;
+    lastWorkflowWidgetSyncSignature = "clear";
+    hasWorkflowWidgetSync = true;
     ctx.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
   }
 
   function syncSidebar(ctx: ExtensionContext): void {
-    planEditor?.setSidebarState(getSidebarViewModel(ctx));
+    if (!planEditor) return;
+    const model = getSidebarViewModel(ctx);
+    const nextSignature = getSidebarSyncSignature(model);
+    if (hasSidebarSync && lastSidebarSyncSignature === nextSignature) return;
+    lastSidebarSyncSignature = nextSignature;
+    hasSidebarSync = true;
+    planEditor.setSidebarState(model);
   }
 
   function syncWorkflowWidget(ctx: ExtensionContext, model: PlanSidebarViewModel | undefined): void {
     if (!ctx.hasUI) return;
-
     if (!model) {
       clearWorkflowWidget(ctx);
       return;
     }
 
-    const lastRenderWidth = planEditor?.getLastRenderWidth();
-    const railVisible = state.panelVisible !== false
-      && typeof lastRenderWidth === "number"
-      && Boolean(getDockedSidebarLayout(lastRenderWidth, model));
+    const presentationOptions = { allowDocked: state.panelVisible !== false };
+    const presentation = planEditor?.getWorkflowPresentation(model, presentationOptions)
+      ?? getPlanWorkflowPresentation(planEditor?.getLastRenderWidth(), model, presentationOptions);
 
-    if (railVisible) {
+    if (presentation.mode === "docked") {
       clearWorkflowWidget(ctx);
       return;
     }
 
-    ctx.ui.setWidget(WIDGET_KEY, renderPlanSidebarFallback(model, ctx.ui.theme, getCompactSidebarWidth()), { placement: "belowEditor" });
+    const widgetLines = renderPlanSidebarFallback(model, ctx.ui.theme, getCompactSidebarWidth());
+    const nextSignature = `widget:${JSON.stringify(widgetLines)}`;
+    if (hasWorkflowWidgetSync && lastWorkflowWidgetSyncSignature === nextSignature) return;
+    lastWorkflowWidgetSyncSignature = nextSignature;
+    hasWorkflowWidgetSync = true;
+    ctx.ui.setWidget(WIDGET_KEY, widgetLines, { placement: "belowEditor" });
   }
 
   function updateUi(ctx: ExtensionContext): void {
@@ -423,25 +494,25 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     const completed = steps.filter((step) => step.completed).length;
     const warningCount = state.execution?.warnings.length ?? 0;
     const workflowModel = buildSidebarViewModel(ctx);
+    let statusValue: string | undefined;
 
     if (state.mode === "executing" && steps.length > 0) {
       const warningSuffix = warningCount > 0 ? ctx.ui.theme.fg("warning", ` !${warningCount}`) : "";
       const frontierSuffix = state.execution?.frontierStepNumbers.length
         ? ctx.ui.theme.fg("muted", ` · ${formatFrontierLabel(getExecutionFrontier(steps))}`)
         : "";
-      ctx.ui.setStatus("opencode-plan", ctx.ui.theme.fg("accent", `PLAN ${completed}/${steps.length}`) + frontierSuffix + warningSuffix);
+      statusValue = ctx.ui.theme.fg("accent", `PLAN ${completed}/${steps.length}`) + frontierSuffix + warningSuffix;
     } else if (state.mode === "approved_waiting_execution") {
-      ctx.ui.setStatus("opencode-plan", ctx.ui.theme.fg("success", "PLAN READY"));
+      statusValue = ctx.ui.theme.fg("success", "PLAN READY");
     } else if (state.mode === "approval_pending") {
-      ctx.ui.setStatus("opencode-plan", ctx.ui.theme.fg("warning", "PLAN REVIEW"));
+      statusValue = ctx.ui.theme.fg("warning", "PLAN REVIEW");
     } else if (state.mode === "planning") {
-      ctx.ui.setStatus("opencode-plan", ctx.ui.theme.fg("warning", "PLAN"));
-    } else {
-      ctx.ui.setStatus("opencode-plan", undefined);
+      statusValue = ctx.ui.theme.fg("warning", "PLAN");
     }
 
-    syncWorkflowWidget(ctx, workflowModel);
+    syncStatus(ctx, statusValue);
     syncSidebar(ctx);
+    syncWorkflowWidget(ctx, workflowModel);
   }
 
   function installEditorHotkey(ctx: ExtensionContext): void {
@@ -471,7 +542,10 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       }, () => {
         scheduleStateFlush(ctx);
       });
-      planEditor.setSidebarState(getSidebarViewModel(ctx));
+      const initialSidebarModel = getSidebarViewModel(ctx);
+      planEditor.setSidebarState(initialSidebarModel);
+      lastSidebarSyncSignature = getSidebarSyncSignature(initialSidebarModel);
+      hasSidebarSync = true;
       return planEditor;
     });
   }
@@ -480,6 +554,8 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     latestCtx = ctx;
     if (isPlanAuthoringMode(state.mode)) {
       pi.setActiveTools(getPlanningTools());
+    } else if (state.mode === "approved_waiting_execution") {
+      pi.setActiveTools(getWorkflowResumeTools());
     } else if (state.mode === "executing") {
       pi.setActiveTools(getExecutionTools());
     } else if (state.previousActiveTools && state.previousActiveTools.length > 0) {
@@ -518,23 +594,137 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     scheduleStateFlush(ctx, { persist: true });
   }
 
-  async function startExecutionMode(ctx: ExtensionContext): Promise<void> {
-    await ensurePlanFile(ctx);
-    await syncPlanFromDisk(ctx);
-    state.mode = "executing";
-    state.subagents = [];
-    const execution = ensureExecutionState();
-    execution.lastProgressAt = execution.lastProgressAt ?? new Date().toISOString();
-    execution.warnings = deriveExecutionWarnings(state.artifact, state.approval?.approvedSignature, execution.warnings);
-    applyMode(ctx);
-    pi.appendEntry(EXECUTE_ENTRY, {
-      mode: state.mode,
-      planPath: state.planPath,
-      artifact: state.artifact,
-      approval: state.approval,
-      execution: state.execution,
+  function cloneExecutionStateForSession(execution: PlanExecutionState | undefined, warnings: string[]): PlanExecutionState {
+    return {
+      completedSteps: [...(execution?.completedSteps ?? [])],
+      activeStep: execution?.activeStep,
+      readySteps: [...(execution?.readySteps ?? [])],
+      frontierStepNumbers: [...(execution?.frontierStepNumbers ?? [])],
+      frontierBatch: execution?.frontierBatch,
+      blockedSteps: [...(execution?.blockedSteps ?? [])],
+      checkpoints: [...(execution?.checkpoints ?? []).map((checkpoint) => ({
+        ...checkpoint,
+        files: [...checkpoint.files],
+        verification: [...checkpoint.verification],
+        blockers: [...checkpoint.blockers],
+        missing: [...checkpoint.missing],
+      }))],
+      warnings: [...warnings],
+      planChangedSinceApproval: execution?.planChangedSinceApproval,
+      requiresReapproval: execution?.requiresReapproval,
+      lastProgressAt: execution?.lastProgressAt,
+      lastProgressSource: execution?.lastProgressSource,
+      lastDelegation: execution?.lastDelegation ? { ...execution.lastDelegation } : undefined,
+    };
+  }
+
+  function buildExecutionKickoffPrompt(planPath: string, approval: PlanState["approval"] | undefined, cwd: string): string {
+    const approvedHandoff = approval?.handoff;
+    const frontierNote = approvedHandoff?.readySteps.length
+      ? ` Ready frontier: ${approvedHandoff.readySteps.join(", ")}${approvedHandoff.frontierBatch ? ` (batch ${approvedHandoff.frontierBatch})` : ""}.`
+      : "";
+    const successNote = approvedHandoff?.successCriteria.length
+      ? ` Success criteria: ${approvedHandoff.successCriteria.join(" | ")}.`
+      : "";
+    const scopeNote = approvedHandoff?.scopeAnchors.length
+      ? ` Scope anchors: ${approvedHandoff.scopeAnchors.join(" | ")}.`
+      : "";
+    const verificationNote = approvedHandoff?.verification.length
+      ? ` Verification focus: ${approvedHandoff.verification.join(" | ")}.`
+      : "";
+    const policyNote = approvedHandoff?.executionPolicy.length
+      ? ` Execution policy: ${approvedHandoff.executionPolicy.join(" | ")}.`
+      : "";
+    const pauseNote = approvedHandoff?.pauseConditions.length
+      ? ` Pause conditions: ${approvedHandoff.pauseConditions.join(" | ")}.`
+      : "";
+    const delegationNote = approvedHandoff?.delegationGuidance.length
+      ? ` Delegation guidance: ${approvedHandoff.delegationGuidance.join(" | ")}.`
+      : "";
+
+    return `Execute the approved plan in ${toProjectRelative(planPath, cwd)}. Start from the ready frontier rather than the first unfinished step in plan order, fan out same-batch parallel work when it is truly independent, and include [DONE:n] markers as each step completes.${frontierNote}${successNote}${scopeNote}${verificationNote}${policyNote}${pauseNote}${delegationNote}`;
+  }
+
+  async function seedFreshExecutionSession(
+    parentSession: string | undefined,
+    handoff: {
+      planPath: string;
+      previousActiveTools?: string[];
+      panelVisible: boolean;
+      approval?: PlanState["approval"];
+      artifact?: PlanArtifact;
+      execution?: PlanExecutionState;
+    },
+    ctx: ExtensionCommandContext,
+  ): Promise<{ cancelled: boolean }> {
+    return ctx.newSession({
+      parentSession,
+      setup: async (sessionManager) => {
+        const approval = handoff.approval
+          ? {
+            ...handoff.approval,
+            validation: handoff.approval.validation ? { ...handoff.approval.validation } : handoff.approval.validation,
+            handoff: handoff.approval.handoff,
+          }
+          : undefined;
+        const warnings = deriveExecutionWarnings(handoff.artifact, approval?.approvedSignature, handoff.execution?.warnings);
+        const execution = cloneExecutionStateForSession(handoff.execution, warnings);
+        execution.lastProgressAt = execution.lastProgressAt ?? new Date().toISOString();
+
+        sessionManager.appendCustomEntry(STATE_ENTRY, {
+          mode: "executing",
+          planPath: handoff.planPath,
+          previousActiveTools: handoff.previousActiveTools,
+          panelVisible: handoff.panelVisible,
+          artifact: handoff.artifact,
+          approval,
+          execution,
+          subagents: [],
+        });
+        sessionManager.appendCustomEntry(EXECUTE_ENTRY, {
+          mode: "executing",
+          planPath: handoff.planPath,
+          artifact: handoff.artifact,
+          approval,
+          execution,
+        });
+      },
     });
-    scheduleStateFlush(ctx, { persist: true });
+  }
+
+  async function seedFreshPlanningSession(
+    parentSession: string | undefined,
+    request: string,
+    previousActiveTools: string[] | undefined,
+    panelVisible: boolean,
+    ctx: ExtensionCommandContext,
+  ): Promise<{ cancelled: boolean }> {
+    return ctx.newSession({
+      parentSession,
+      setup: async (sessionManager) => {
+        const sessionFile = sessionManager.getSessionFile();
+        if (!sessionFile) {
+          throw new Error("Could not resolve the fresh planning session file.");
+        }
+
+        const planPath = planPathForSession(sessionFile, ctx.cwd);
+        await mkdir(dirname(planPath), { recursive: true });
+        if (!(await fileExists(planPath))) {
+          await writeFile(planPath, createPlanTemplate(request), "utf8");
+        }
+
+        sessionManager.appendCustomEntry(STATE_ENTRY, {
+          mode: "planning",
+          planPath,
+          previousActiveTools,
+          panelVisible,
+          artifact: undefined,
+          approval: undefined,
+          execution: undefined,
+          subagents: [],
+        });
+      },
+    });
   }
 
   function queueUserMessage(ctx: ExtensionContext, text: string): void {
@@ -556,13 +746,13 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     if (drift.requiresReapproval) {
       const choice = await ctx.ui.select(
         `${drift.reasons.join(" ")}\n\nChoose how to continue:`,
-        ["Re-review plan", "Override and start execution", "Cancel"],
+        ["Re-review plan and envelope", "Override and start execution", "Cancel"],
       );
       if (!choice || choice === "Cancel") {
         ctx.ui.notify("Starting execution was cancelled.", "info");
         return;
       }
-      if (choice === "Re-review plan") {
+      if (choice === "Re-review plan and envelope") {
         await reviewPlanForApproval(ctx, { directStart: true, commandCtx: ctx });
         return;
       }
@@ -578,40 +768,19 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
           handoff: state.approval.handoff ?? (state.artifact ? buildExecutionHandoff(state.artifact) : undefined),
         }
         : undefined,
+      artifact: state.artifact,
+      execution: state.execution,
     };
 
     const parentSession = ctx.sessionManager.getSessionFile();
-    const result = await ctx.newSession({ parentSession });
+    const result = await seedFreshExecutionSession(parentSession, handoff, ctx);
     if (result.cancelled) {
       ctx.ui.notify("Starting execution was cancelled.", "info");
       return;
     }
 
-    latestCtx = ctx;
-    state = createInitialState();
-    state.planPath = handoff.planPath;
-    state.previousActiveTools = handoff.previousActiveTools;
-    state.panelVisible = handoff.panelVisible;
-    state.approval = handoff.approval;
-
-    await startExecutionMode(ctx);
     ctx.ui.notify("Started execution in a fresh session.", "info");
-
-    const approvedHandoff = handoff.approval?.handoff;
-    const frontierNote = approvedHandoff?.readySteps.length
-      ? ` Ready frontier: ${approvedHandoff.readySteps.join(", ")}${approvedHandoff.frontierBatch ? ` (batch ${approvedHandoff.frontierBatch})` : ""}.`
-      : "";
-    const verificationNote = approvedHandoff?.verification.length
-      ? ` Verification focus: ${approvedHandoff.verification.join(" | ")}.`
-      : "";
-    const delegationNote = approvedHandoff?.delegationGuidance.length
-      ? ` Delegation guidance: ${approvedHandoff.delegationGuidance.join(" | ")}.`
-      : "";
-
-    queueUserMessage(
-      ctx,
-      `Execute the approved plan in ${toProjectRelative(handoff.planPath, ctx.cwd)}. Start with the first unfinished numbered step and include [DONE:n] markers as each step completes.${frontierNote}${verificationNote}${delegationNote}`,
-    );
+    queueUserMessage(ctx, buildExecutionKickoffPrompt(handoff.planPath, handoff.approval, ctx.cwd));
   }
 
   function prepareApprovedExecutionCommand(ctx: ExtensionContext): void {
@@ -643,40 +812,22 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     planBootstrapInProgress = true;
     try {
       const parentSession = ctx.sessionManager.getSessionFile();
-      const branchStart = ctx.sessionManager.getBranch().length;
+      const kickoffPrompt = buildPlanningKickoffPrompt(request);
 
-      ctx.ui.notify("Improving the planning request with prompt-master...", "info");
-      dispatchPromptMaster(pi, ctx, request, DEFAULT_PROMPT_MASTER_TARGET);
-
-      let bootstrapResult: PlanBootstrapResult = { prompt: request, usedFallback: true };
-      try {
-        await ctx.waitForIdle();
-        const improvedPrompt = getPromptMasterBootstrapPrompt(ctx.sessionManager.getBranch(), branchStart);
-        if (improvedPrompt) {
-          bootstrapResult = { prompt: improvedPrompt, usedFallback: false };
-        } else {
-          ctx.ui.notify("Prompt-master did not return a paste-ready prompt. Falling back to the original planning request.", "warning");
-        }
-      } catch {
-        ctx.ui.notify("Prompt-master bootstrap failed. Falling back to the original planning request.", "warning");
-      }
-
-      const result = await ctx.newSession({ parentSession });
+      const result = await seedFreshPlanningSession(
+        parentSession,
+        request,
+        pi.getActiveTools(),
+        state.panelVisible,
+        ctx,
+      );
       if (result.cancelled) {
         ctx.ui.notify("Starting a fresh planning session was cancelled.", "info");
         return;
       }
 
-      latestCtx = ctx;
-      state = createInitialState();
-      await enterPlanningMode(ctx, request);
-      ctx.ui.notify(
-        bootstrapResult.usedFallback
-          ? "Started a fresh planning session with the original request."
-          : "Started a fresh planning session with the improved planning prompt.",
-        "info",
-      );
-      queueUserMessage(ctx, bootstrapResult.prompt);
+      ctx.ui.notify("Started a fresh planning session with the native planning kickoff.", "info");
+      queueUserMessage(ctx, kickoffPrompt);
     } finally {
       planBootstrapInProgress = false;
     }
@@ -736,16 +887,14 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       };
       scheduleStateFlush(ctx, { persist: true });
 
-      const optionsList = validation.errors.length > 0
-        ? ["Revise in editor", "Keep planning"]
-        : [options.directStart ? "Approve and start execution" : "Approve plan", "Revise in editor", "Keep planning"];
+      const approvalOptions = getApprovalReviewOptions(validation, options.directStart);
       const choice = await showApprovalReview(ctx, {
-        title: "Review plan for approval",
+        title: "Review plan and operating envelope",
         summary,
-        options: optionsList,
+        options: approvalOptions.options,
       });
 
-      if (!choice || choice === "Keep planning") {
+      if (!choice || !approvalOptions.options.includes(choice) || choice === "Keep planning") {
         state.mode = "planning";
         applyMode(ctx);
         scheduleStateFlush(ctx, { persist: true });
@@ -760,6 +909,20 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
         applyMode(ctx);
         scheduleStateFlush(ctx, { persist: true });
         continue;
+      }
+
+      if (!approvalOptions.approveLabel || choice !== approvalOptions.approveLabel) {
+        state.mode = "planning";
+        applyMode(ctx);
+        scheduleStateFlush(ctx, { persist: true });
+        return { action: "kept_planning", startedExecution: false, planPath };
+      }
+
+      if (approvalOptions.overrideRequired && validation.blocking.length > 0) {
+        ctx.ui.notify(
+          `Plan approved with override. ${validation.blocking.length} approval blocker${validation.blocking.length === 1 ? " remains" : "s remain"}; they will carry into execution warnings.`,
+          "warning",
+        );
       }
 
       state.mode = "approved_waiting_execution";
@@ -810,13 +973,39 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
         ? {
           goal: undefined,
           context: [],
+          successCriteria: [],
+          executionPolicy: [],
+          rereviewTriggers: [],
           blockers: [],
           openQuestions: [],
           files: [],
           verification: [],
-          steps: restoredState.steps,
+          steps: restoredState.steps.map((step) => ({
+            ...step,
+            scope: step.scope ?? [],
+            checkpoint: step.checkpoint ?? [],
+            reviewGate: step.reviewGate,
+            reviewReason: step.reviewReason,
+          })),
           validation: emptyValidation(),
           signature: restoredState.steps.map((step) => `${step.step}:${step.text}`).join("\n"),
+          handoff: buildExecutionHandoff({
+            goal: undefined,
+            context: [],
+            successCriteria: [],
+            executionPolicy: [],
+            rereviewTriggers: [],
+            blockers: [],
+            files: [],
+            verification: [],
+            steps: restoredState.steps.map((step) => ({
+              ...step,
+              scope: step.scope ?? [],
+              checkpoint: step.checkpoint ?? [],
+              reviewGate: step.reviewGate,
+              reviewReason: step.reviewReason,
+            })),
+          }),
         }
         : undefined);
 
@@ -827,7 +1016,12 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
         panelVisible: restoredState.panelVisible ?? true,
         artifact: legacyArtifact,
         approval: restoredState.approval,
-        execution: restoredState.execution,
+        execution: restoredState.execution
+          ? {
+            ...restoredState.execution,
+            checkpoints: [...(restoredState.execution.checkpoints ?? [])],
+          }
+          : restoredState.execution,
         subagents: (restoredState.subagents ?? []).map(cloneSubagent),
       };
     }
@@ -847,9 +1041,11 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
         frontierStepNumbers: [],
         frontierBatch: undefined,
         blockedSteps: [],
+        checkpoints: [],
         warnings: [],
       };
-      state.execution.warnings = uniqueNames([...(state.execution.warnings ?? []), ...progress.warnings]);
+      const checkpointWarnings = progress.count > 0 ? recordStepCheckpoint(progress.completedSteps, textSinceExecute, "assistant") : [];
+      state.execution.warnings = uniqueNames([...(state.execution.warnings ?? []), ...progress.warnings, ...checkpointWarnings]);
       if (progress.source) state.execution.lastProgressSource = progress.source;
       updateExecutionState();
     }
@@ -863,10 +1059,103 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     updateExecutionState();
   }
 
+  function recordStepCheckpoint(stepNumbers: number[], summaryText: string | undefined, source: "assistant" | "tool" | "subagent"): string[] {
+    if (stepNumbers.length === 0) return [];
+
+    const execution = ensureExecutionState();
+    const rawSummary = (summaryText ?? "").replace(/\s+/g, " ").trim();
+    const normalized = normalizeCheckpointSummary(rawSummary);
+    const label = stepNumbers.length === 1 ? `step ${stepNumbers[0]}` : `steps ${stepNumbers.join(", ")}`;
+    const warnings: string[] = [];
+
+    if (!rawSummary) {
+      warnings.push(`Recorded ${label} completion without a normalized checkpoint summary.`);
+    } else if (normalized.missing.length > 0) {
+      warnings.push(`Checkpoint for ${label} is missing ${normalized.missing.join(", ")}.`);
+    }
+
+    const recordedAt = new Date().toISOString();
+    for (const step of stepNumbers) {
+      const checkpoint = {
+        step,
+        source,
+        status: normalized.missing.length === 0 ? "complete" as const : "partial" as const,
+        outcome: normalized.outcome,
+        files: [...normalized.files],
+        verification: [...normalized.verification],
+        blockers: [...normalized.blockers],
+        unblockStatus: normalized.unblockStatus,
+        missing: [...normalized.missing],
+        rawSummary,
+        recordedAt,
+      };
+      const existingIndex = execution.checkpoints.findIndex((item) => item.step === step);
+      if (existingIndex >= 0) execution.checkpoints.splice(existingIndex, 1, checkpoint);
+      else execution.checkpoints.push(checkpoint);
+    }
+
+    execution.checkpoints.sort((a, b) => a.step - b.step);
+    return warnings;
+  }
+
+  function mergeStepNumbers(...sets: Array<number[] | undefined>): number[] | undefined {
+    const merged = [...new Set(sets.flatMap((value) => value ?? []).filter((value) => Number.isFinite(value)))].sort((a, b) => a - b);
+    return merged.length > 0 ? merged : undefined;
+  }
+
+  function recordDelegationObservation(status: "allowed" | "blocked", reason: string, stepNumbers: number[] = [], requestedAgent?: string): void {
+    const execution = ensureExecutionState();
+    execution.lastDelegation = {
+      status,
+      reason,
+      stepNumbers: [...stepNumbers].sort((a, b) => a - b),
+      requestedAgent,
+      recordedAt: new Date().toISOString(),
+    };
+  }
+
+  function queueDelegationIntent(intent: PendingDelegationIntent): void {
+    pendingDelegationIntents.push(intent);
+    pendingDelegationIntents = pendingDelegationIntents.slice(-12);
+  }
+
+  function takePendingDelegationIntent(type: string): PendingDelegationIntent | undefined {
+    const matchIndex = pendingDelegationIntents.findIndex((intent) => intent.type === type);
+    if (matchIndex < 0) return undefined;
+    const [intent] = pendingDelegationIntents.splice(matchIndex, 1);
+    return intent;
+  }
+
+  function delegationContractStatus(text: string): { hasOutcome: boolean; hasFiles: boolean; hasVerification: boolean; hasBlockers: boolean; hasUnblockStatus: boolean } {
+    return {
+      hasOutcome: /\b(?:outcome|result)\b/i.test(text),
+      hasFiles: /\bfiles?\b|\bpaths?\b/i.test(text),
+      hasVerification: /\bverification\b|\bvalidat(?:e|ed|ion)\b|\btests?\b|\bchecks?\b|\bproof\b/i.test(text),
+      hasBlockers: /\b(?:blocker|risk|issue|follow-?up)s?\b/i.test(text),
+      hasUnblockStatus: /\b(?:unblock(?:ed)?\s+status|unblocked|downstream\s+status|next\s+frontier)\b/i.test(text),
+    };
+  }
+
+  function describeDelegationAssociation(source: "description" | "prompt" | "intent", stepNumbers: number[]): string {
+    const detail = stepNumbers.length > 0 ? `steps ${stepNumbers.join(", ")}` : "no steps";
+    if (source === "intent") return `linked from delegated request (${detail})`;
+    if (source === "prompt") return `linked from prompt text (${detail})`;
+    return `linked from description (${detail})`;
+  }
+
   function upsertSubagent(update: Partial<PlanSubagentActivity> & { id: string; description?: string; type?: string; status?: SubagentStatus }): void {
     const existing = state.subagents.find((item) => item.id === update.id);
+    const mergedSteps = mergeStepNumbers(existing?.stepNumbers, update.stepNumbers);
+    const { progressItems, ...rest } = update;
+    const definedUpdate = Object.fromEntries(Object.entries(rest).filter(([_key, value]) => value !== undefined));
+
     if (existing) {
-      Object.assign(existing, update);
+      Object.assign(existing, definedUpdate);
+      existing.stepNumbers = mergedSteps;
+      if (update.stepAssociation) existing.stepAssociation = update.stepAssociation;
+      if (progressItems) existing.progressItems = progressItems.map((item) => ({ ...item }));
+      if (update.activeProgressItemId !== undefined) existing.activeProgressItemId = update.activeProgressItemId;
+      if (update.fallbackActivity !== undefined) existing.fallbackActivity = update.fallbackActivity;
       return;
     }
 
@@ -881,7 +1170,34 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       toolUses: update.toolUses,
       durationMs: update.durationMs,
       error: update.error,
+      stepNumbers: mergedSteps,
+      stepAssociation: update.stepAssociation,
+      normalizedSummary: update.normalizedSummary,
+      progressItems: progressItems?.map((item) => ({ ...item })),
+      activeProgressItemId: update.activeProgressItemId,
+      fallbackActivity: update.fallbackActivity,
     });
+  }
+
+  function getSubagentAssociation(type: string, description: string): { stepNumbers?: number[]; stepAssociation?: string } {
+    const knownSteps = state.artifact?.steps.map((step) => step.step) ?? [];
+    const descriptionSteps = extractReferencedStepsFromText(description, knownSteps);
+    if (descriptionSteps.length > 0) {
+      return {
+        stepNumbers: descriptionSteps,
+        stepAssociation: describeDelegationAssociation("description", descriptionSteps),
+      };
+    }
+
+    const intent = takePendingDelegationIntent(normalizeAgentPreference(type));
+    if (intent) {
+      return {
+        stepNumbers: intent.stepNumbers,
+        stepAssociation: intent.stepAssociation,
+      };
+    }
+
+    return {};
   }
 
   function pruneFinishedSubagents(): void {
@@ -950,8 +1266,8 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
           {
             type: "text",
             text: ctx.hasUI
-              ? "Prepared /plan <request> in the editor so the user can restart planning with prompt improvement in a fresh session."
-              : `Ask the user to run ${bootstrapCommand} to restart planning with prompt improvement in a fresh session.`,
+              ? "Prepared /plan <request> in the editor so the user can restart planning in a fresh session with the native kickoff prompt."
+              : `Ask the user to run ${bootstrapCommand} to restart planning in a fresh session with the native kickoff prompt.`,
           },
         ],
         details: { bootstrapCommand },
@@ -1011,7 +1327,10 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       }
 
       const result = updateStepStatus(state.artifact.steps, Number(params.step), normalizedStatus as PlanStep["status"], params.note);
-      noteProgress("tool", result.warnings);
+      const checkpointWarnings = (normalizedStatus === "completed" || (params.note && String(params.note).trim()))
+        ? recordStepCheckpoint([Number(params.step)], String(params.note ?? ""), "tool")
+        : [];
+      noteProgress("tool", [...result.warnings, ...checkpointWarnings]);
       scheduleStateFlush(ctx, { persist: true });
 
       if (!result.updated) {
@@ -1166,6 +1485,13 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_call", async (event, ctx) => {
+    if (state.mode !== "normal" && event.toolName === "prompt_improve") {
+      return {
+        block: true,
+        reason: "Prompt improvement is blocked while plan mode is active. Exit plan mode before invoking prompt_improve directly.",
+      };
+    }
+
     if (isPlanAuthoringMode(state.mode)) {
       if (event.toolName === "bash") {
         const command = String((event.input as { command?: string }).command ?? "");
@@ -1213,62 +1539,78 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       isolation?: string;
       join_mode?: string;
     };
-    const combinedText = `${input.description ?? ""}\n${input.prompt ?? ""}`;
+    const descriptionText = input.description ?? "";
+    const promptText = input.prompt ?? "";
+    const combinedText = `${descriptionText}\n${promptText}`;
     const knownSteps = state.artifact.steps.map((step) => step.step);
+    const descriptionSteps = extractReferencedStepsFromText(descriptionText, knownSteps);
+    const promptSteps = extractReferencedStepsFromText(promptText, knownSteps);
     const referencedSteps = extractReferencedStepsFromText(combinedText, knownSteps);
     const frontier = getExecutionFrontier(state.artifact.steps);
     const frontierNumbers = new Set(frontier.map((step) => step.step));
+    const requestedAgent = normalizeAgentPreference(input.subagent_type);
+    const blockDelegation = (reason: string): { block: true; reason: string } => {
+      recordDelegationObservation("blocked", reason, referencedSteps, requestedAgent);
+      scheduleStateFlush(ctx, { persist: true });
+      return { block: true, reason };
+    };
 
     if (frontier.length > 0 && referencedSteps.length === 0) {
-      return {
-        block: true,
-        reason: `Execution subagents must reference a numbered plan step from the current ready frontier (${frontier.map((step) => step.step).join(", ")}).`,
-      };
+      return blockDelegation(`Execution subagents must reference a numbered plan step from the current ready frontier (${frontier.map((step) => step.step).join(", ")}).`);
     }
 
     const offFrontier = referencedSteps.filter((step) => !frontierNumbers.has(step));
     if (offFrontier.length > 0) {
-      return {
-        block: true,
-        reason: `Only the current ready frontier may be delegated. Off-frontier step reference(s): ${offFrontier.join(", ")}.`,
-      };
+      return blockDelegation(`Only the current ready frontier may be delegated. Off-frontier step reference(s): ${offFrontier.join(", ")}.`);
     }
 
-    const requestedAgent = normalizeAgentPreference(input.subagent_type);
     for (const step of frontier.filter((item) => referencedSteps.includes(item.step))) {
       const policy = deriveSubagentPolicy(step, frontier.length);
-      if (policy.preferredAgent !== "main session" && requestedAgent !== policy.preferredAgent) {
-        return {
-          block: true,
-          reason: `Step ${step.step} is planned for ${policy.preferredAgent}. Requested subagent type was ${requestedAgent}.`,
-        };
+      if (policy.preferredAgent === "main session") {
+        return blockDelegation(`Step ${step.step} is planned for main session work and should stay in the main session.`);
+      }
+      if (requestedAgent !== policy.preferredAgent) {
+        return blockDelegation(`Step ${step.step} is planned for ${policy.preferredAgent}. Requested subagent type was ${requestedAgent}.`);
       }
       if (policy.isolation === "worktree" && input.isolation !== "worktree") {
-        return {
-          block: true,
-          reason: `Parallel write-capable work for step ${step.step} must use isolation: worktree.`,
-        };
+        return blockDelegation(`Parallel write-capable work for step ${step.step} must use isolation: worktree.`);
       }
       if (policy.runInBackground && input.run_in_background !== true) {
-        return {
-          block: true,
-          reason: `Step ${step.step} should run as a background subagent so the frontier can fan out before fan-in.`,
-        };
+        return blockDelegation(`Step ${step.step} should run as a background subagent so the frontier can fan out before fan-in.`);
       }
       if (policy.joinMode === "group" && input.join_mode === "async") {
-        return {
-          block: true,
-          reason: `Step ${step.step} should use grouped fan-in notifications, not async join mode, while the current frontier is parallelized.`,
-        };
+        return blockDelegation(`Step ${step.step} should use grouped fan-in notifications, not async join mode, while the current frontier is parallelized.`);
       }
     }
 
-    if (!/\bverification\b/i.test(combinedText) || !/\bfiles?\b/i.test(combinedText) || !/\b(?:blocker|risk)s?\b/i.test(combinedText)) {
-      return {
-        block: true,
-        reason: "Delegated execution prompts must request a normalized result summary covering files touched, verification, and blockers/risks.",
-      };
+    const contract = delegationContractStatus(combinedText);
+    if (!contract.hasOutcome || !contract.hasFiles || !contract.hasVerification || !contract.hasBlockers || !contract.hasUnblockStatus) {
+      const missing: string[] = [];
+      if (!contract.hasOutcome) missing.push("outcome/result");
+      if (!contract.hasFiles) missing.push("files/paths touched");
+      if (!contract.hasVerification) missing.push("verification/tests/checks");
+      if (!contract.hasBlockers) missing.push("blockers/risks/issues");
+      if (!contract.hasUnblockStatus) missing.push("unblock status");
+      return blockDelegation(`Delegated execution prompts must request a normalized result summary covering ${missing.join(", ")}.`);
     }
+
+    const associationSource = descriptionSteps.length > 0 ? "description" : promptSteps.length > 0 ? "prompt" : "intent";
+    queueDelegationIntent({
+      type: requestedAgent,
+      description: descriptionText,
+      prompt: promptText,
+      stepNumbers: referencedSteps,
+      requestedAgent,
+      stepAssociation: describeDelegationAssociation(associationSource, referencedSteps),
+      recordedAt: new Date().toISOString(),
+    });
+    recordDelegationObservation(
+      "allowed",
+      `Delegating frontier step${referencedSteps.length === 1 ? "" : "s"} ${referencedSteps.join(", ")} to ${requestedAgent}.`,
+      referencedSteps,
+      requestedAgent,
+    );
+    scheduleStateFlush(ctx, { persist: true });
   });
 
   pi.on("tool_result", async (event, ctx) => {
@@ -1280,9 +1622,23 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
           const existing = state.subagents.find((item) => item.id === agentId);
           if (existing && summary) {
             existing.normalizedSummary = summary.slice(0, 280);
-            if (!/\bverification\b/i.test(summary) || !/\bfiles?\b/i.test(summary) || !/\b(?:blocker|risk)s?\b/i.test(summary)) {
-              noteProgress(undefined, [`Subagent ${agentId} returned a result without the full normalized summary contract (files, verification, blockers/risks).`]);
+            const summaryItem = {
+              id: "normalized-result-summary",
+              label: existing.normalizedSummary,
+              status: "completed" as const,
+              source: "normalized_result_summary" as const,
+            };
+            existing.progressItems = [
+              ...(existing.progressItems ?? []).filter((item) => item.id !== summaryItem.id),
+              summaryItem,
+            ];
+            existing.activeProgressItemId = existing.progressItems.find((item) => item.status === "active")?.id;
+            const checkpointWarnings = recordStepCheckpoint(existing.stepNumbers ?? [], summary, "subagent");
+            const contract = delegationContractStatus(summary);
+            if (!contract.hasOutcome || !contract.hasFiles || !contract.hasVerification || !contract.hasBlockers || !contract.hasUnblockStatus) {
+              checkpointWarnings.push(`Subagent ${agentId} returned a result without the full normalized summary contract (outcome/result, files/paths, verification/tests/checks, blockers/risks/issues, unblock status).`);
             }
+            if (checkpointWarnings.length > 0) noteProgress(undefined, checkpointWarnings);
           }
         }
       }
@@ -1307,7 +1663,11 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     if (state.mode !== "executing" || !state.artifact) return;
     if (!isAssistantMessage(event.message)) return;
 
-    const progress = markCompletedSteps(getAssistantText(event.message), state.artifact.steps);
+    const assistantText = getAssistantText(event.message);
+    const progress = markCompletedSteps(assistantText, state.artifact.steps);
+    if (progress.count > 0) {
+      progress.warnings.push(...recordStepCheckpoint(progress.completedSteps, assistantText, "assistant"));
+    }
     if (progress.count > 0 || progress.warnings.length > 0) {
       noteProgress(progress.source, progress.warnings);
       scheduleStateFlush(ctx, { persist: true });
@@ -1335,6 +1695,7 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
   async function restoreAndApply(ctx: ExtensionContext): Promise<void> {
     latestCtx = ctx;
     sessionVersion += 1;
+    pendingDelegationIntents = [];
     const currentSessionVersion = sessionVersion;
     restoreFromBranch(ctx);
 
@@ -1350,6 +1711,7 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       if (currentSessionVersion !== sessionVersion) return;
     }
 
+    resetUiSyncState();
     applyMode(ctx);
   }
 
@@ -1363,6 +1725,7 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     sessionVersion += 1;
+    pendingDelegationIntents = [];
     ctx.ui.setStatus("opencode-plan", undefined);
     clearWorkflowWidget(ctx);
     planEditor?.setSidebarState(undefined);
@@ -1372,9 +1735,53 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
     editorInstalled = false;
     stateFlushScheduled = false;
     persistQueued = false;
+    resetUiSyncState();
+  });
+
+  pi.events.on("subagents:progress", (eventData: {
+    id: string;
+    type: string;
+    description: string;
+    status?: SubagentStatus;
+    isBackground?: boolean;
+    startedAt?: number;
+    completedAt?: number;
+    toolUses?: number;
+    durationMs?: number;
+    error?: string;
+    stepAssociation?: string;
+    normalizedSummary?: string;
+    activeItemId?: string;
+    fallbackActivity?: string;
+    items?: Array<{ id: string; label: string; status: "pending" | "active" | "completed"; source: "description" | "step_association" | "normalized_result_summary"; detail?: string }>;
+  }) => {
+    const association = getSubagentAssociation(eventData.type, eventData.description);
+    upsertSubagent({
+      id: eventData.id,
+      type: eventData.type,
+      description: eventData.description,
+      status: eventData.status,
+      isBackground: eventData.isBackground,
+      startedAt: eventData.startedAt,
+      completedAt: eventData.completedAt,
+      toolUses: eventData.toolUses,
+      durationMs: eventData.durationMs,
+      error: eventData.error,
+      stepNumbers: association.stepNumbers,
+      stepAssociation: eventData.stepAssociation ?? association.stepAssociation,
+      normalizedSummary: eventData.normalizedSummary,
+      progressItems: eventData.items,
+      activeProgressItemId: eventData.activeItemId,
+      fallbackActivity: eventData.fallbackActivity,
+    });
+    if (latestCtx) {
+      pruneFinishedSubagents();
+      scheduleStateFlush(latestCtx, { persist: true });
+    }
   });
 
   pi.events.on("subagents:created", (eventData: { id: string; type: string; description: string; isBackground?: boolean }) => {
+    const association = getSubagentAssociation(eventData.type, eventData.description);
     upsertSubagent({
       id: eventData.id,
       type: eventData.type,
@@ -1382,7 +1789,8 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       status: eventData.isBackground ? "background" : "queued",
       isBackground: eventData.isBackground,
       startedAt: Date.now(),
-      stepNumbers: extractReferencedStepsFromText(eventData.description, state.artifact?.steps.map((step) => step.step) ?? []),
+      stepNumbers: association.stepNumbers,
+      stepAssociation: association.stepAssociation,
     });
     if (latestCtx) {
       pruneFinishedSubagents();
@@ -1391,12 +1799,14 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
   });
 
   pi.events.on("subagents:started", (eventData: { id: string; type: string; description: string }) => {
+    const association = getSubagentAssociation(eventData.type, eventData.description);
     upsertSubagent({
       id: eventData.id,
       type: eventData.type,
       description: eventData.description,
       status: "running",
-      stepNumbers: extractReferencedStepsFromText(eventData.description, state.artifact?.steps.map((step) => step.step) ?? []),
+      stepNumbers: association.stepNumbers,
+      stepAssociation: association.stepAssociation,
     });
     if (latestCtx) {
       scheduleStateFlush(latestCtx, { persist: true });
@@ -1404,6 +1814,7 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
   });
 
   pi.events.on("subagents:completed", (eventData: { id: string; type: string; description: string; status?: string; toolUses?: number; durationMs?: number }) => {
+    const association = getSubagentAssociation(eventData.type, eventData.description);
     upsertSubagent({
       id: eventData.id,
       type: eventData.type,
@@ -1412,7 +1823,8 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       completedAt: Date.now(),
       toolUses: eventData.toolUses,
       durationMs: eventData.durationMs,
-      stepNumbers: extractReferencedStepsFromText(eventData.description, state.artifact?.steps.map((step) => step.step) ?? []),
+      stepNumbers: association.stepNumbers,
+      stepAssociation: association.stepAssociation,
     });
     if (latestCtx) {
       pruneFinishedSubagents();
@@ -1421,6 +1833,7 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
   });
 
   pi.events.on("subagents:failed", (eventData: { id: string; type: string; description: string; status?: string; error?: string; toolUses?: number; durationMs?: number }) => {
+    const association = getSubagentAssociation(eventData.type, eventData.description);
     upsertSubagent({
       id: eventData.id,
       type: eventData.type,
@@ -1430,7 +1843,8 @@ export default function opencodePlanMode(pi: ExtensionAPI): void {
       toolUses: eventData.toolUses,
       durationMs: eventData.durationMs,
       error: eventData.error,
-      stepNumbers: extractReferencedStepsFromText(eventData.description, state.artifact?.steps.map((step) => step.step) ?? []),
+      stepNumbers: association.stepNumbers,
+      stepAssociation: association.stepAssociation,
     });
     if (latestCtx) {
       pruneFinishedSubagents();

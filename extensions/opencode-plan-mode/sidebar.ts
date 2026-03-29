@@ -31,6 +31,12 @@ export interface PlanSidebarRenderOptions {
   maxLines?: number;
 }
 
+export type PlanWorkflowPresentation =
+  | { mode: "hidden" }
+  | { mode: "pending" }
+  | { mode: "compact"; width: number }
+  | { mode: "docked"; width: number; layout: DockedSidebarLayout };
+
 export const DOCKED_SIDEBAR_WIDTH_RATIO = 0.24;
 export const DOCKED_SIDEBAR_GUTTER_WIDTH = 1;
 export const MIN_DOCKED_SIDEBAR_TERM_WIDTH = 120;
@@ -39,6 +45,7 @@ export const MAX_DOCKED_SIDEBAR_WIDTH = 42;
 export const MIN_DOCKED_EDITOR_WIDTH = 72;
 const MAX_VISIBLE_WARNINGS = 1;
 const MAX_VISIBLE_SUBAGENTS = 2;
+const MAX_VISIBLE_SUBAGENT_PROGRESS = 2;
 const MAX_VISIBLE_STEPS = 3;
 const MAX_VISIBLE_SECTION_ITEMS = 1;
 const SECTION_LINE_LIMITS = {
@@ -161,6 +168,51 @@ function subagentLine(theme: SidebarTheme, agent: PlanSubagentActivity): string 
   return `${status} ${steps}${theme.fg("text", agent.description)} ${theme.fg("dim", `(${agent.type})`)}`;
 }
 
+function subagentProgressLines(theme: SidebarTheme, agent: PlanSubagentActivity): string[] {
+  const lines: string[] = [];
+  const progressItems = agent.progressItems ?? [];
+  const completed = progressItems.filter((item) => item.status === "completed");
+  const active = progressItems.find((item) => item.id === agent.activeProgressItemId)
+    ?? progressItems.find((item) => item.status === "active")
+    ?? progressItems.find((item) => item.status === "pending");
+
+  for (const item of completed.slice(0, 1)) {
+    const detail = item.detail ? theme.fg("dim", ` (${item.detail})`) : "";
+    lines.push(`${theme.fg("success", "✓")} ${theme.fg("text", item.label)}${detail}`);
+  }
+
+  if (agent.status === "failed" || agent.status === "stopped") {
+    if (agent.error) {
+      lines.push(`${theme.fg("warning", "!")} ${theme.fg("warning", agent.error)}`);
+    }
+  } else if (active) {
+    const detail = active.detail ? theme.fg("dim", ` (${active.detail})`) : "";
+    lines.push(`${theme.fg("accent", "→")} ${theme.fg("text", active.label)}${detail}`);
+  } else if (agent.fallbackActivity) {
+    lines.push(`${theme.fg("dim", "⎿")} ${theme.fg("dim", agent.fallbackActivity)}`);
+  } else if (agent.normalizedSummary && (agent.status === "completed" || agent.status === "steered")) {
+    lines.push(`${theme.fg("success", "✓")} ${theme.fg("text", agent.normalizedSummary)}`);
+  }
+
+  const hiddenCount = Math.max(0, lines.length - MAX_VISIBLE_SUBAGENT_PROGRESS);
+  const visible = lines.slice(0, MAX_VISIBLE_SUBAGENT_PROGRESS);
+  if (hiddenCount > 0) {
+    visible.push(theme.fg("dim", `… +${hiddenCount} more item${hiddenCount === 1 ? "" : "s"}`));
+  }
+  return visible;
+}
+
+function compactSubagentLine(theme: SidebarTheme, subagents: PlanSubagentActivity[]): string | undefined {
+  if (subagents.length === 0) return undefined;
+  const primary = getVisibleSubagents(subagents)[0];
+  const progressLines = primary ? subagentProgressLines(theme, primary) : [];
+  const progress = primary && (primary.status === "running" || primary.status === "queued" || primary.status === "background")
+    ? progressLines.find((line) => line.includes("→") || line.includes("⎿")) ?? progressLines[0]
+    : progressLines[0];
+  const summary = `${theme.fg("muted", "Agents:")} ${summarizeSubagents(theme, subagents)}`;
+  return progress ? `${summary} ${theme.fg("dim", "·")} ${progress}` : summary;
+}
+
 function summarizeFrontier(theme: SidebarTheme, model: PlanSidebarViewModel): string | undefined {
   const frontier = model.execution?.frontierStepNumbers ?? [];
   if (frontier.length === 0) return undefined;
@@ -173,7 +225,15 @@ function summarizeFanIn(theme: SidebarTheme, model: PlanSidebarViewModel): strin
   const frontier = new Set(model.execution?.frontierStepNumbers ?? []);
   if (frontier.size === 0) return undefined;
   const frontierAgents = model.subagents.filter((agent) => agent.stepNumbers?.some((step) => frontier.has(step)));
-  if (frontierAgents.length === 0) return theme.fg("dim", "no delegated work");
+  const offFrontierAgents = model.subagents.filter((agent) => !agent.stepNumbers?.some((step) => frontier.has(step)));
+  const lastDelegation = model.execution?.lastDelegation;
+
+  if (frontierAgents.length === 0) {
+    if (lastDelegation?.status === "blocked") return theme.fg("warning", "delegation blocked");
+    if (model.subagents.length > 0) return theme.fg("dim", "history only");
+    return theme.fg("dim", "no delegation yet");
+  }
+
   const running = frontierAgents.filter((agent) => agent.status === "running" || agent.status === "queued" || agent.status === "background").length;
   const done = frontierAgents.filter((agent) => agent.status === "completed" || agent.status === "steered").length;
   const failed = frontierAgents.filter((agent) => agent.status === "failed" || agent.status === "stopped").length;
@@ -181,6 +241,7 @@ function summarizeFanIn(theme: SidebarTheme, model: PlanSidebarViewModel): strin
     running > 0 ? theme.fg("accent", `${running} waiting`) : undefined,
     done > 0 ? theme.fg("success", `${done} in`) : undefined,
     failed > 0 ? theme.fg("warning", `${failed} failed`) : undefined,
+    offFrontierAgents.length > 0 ? theme.fg("dim", `${offFrontierAgents.length} history`) : undefined,
   ].filter(Boolean).join(theme.fg("dim", " · ")) || theme.fg("dim", "idle");
 }
 
@@ -336,6 +397,9 @@ export function renderPlanSidebar(model: PlanSidebarViewModel, theme: SidebarThe
   lines.push(...wrapIntoBoxLines(theme, innerWidth, `${theme.fg("muted", "Subagents:")} ${summarizeSubagents(theme, model.subagents)}`));
   for (const agent of visibleSubagents) {
     lines.push(...wrapIntoBoxLines(theme, innerWidth, `• ${subagentLine(theme, agent)}`, SECTION_LINE_LIMITS.subagent));
+    for (const progressLine of subagentProgressLines(theme, agent)) {
+      lines.push(...wrapIntoBoxLines(theme, innerWidth, `  ${progressLine}`, 1));
+    }
   }
   const subagentOverflow = summarizeOverflow(theme, hiddenSubagentCount, "subagents");
   if (subagentOverflow) {
@@ -387,7 +451,7 @@ export function renderPlanSidebarFallback(model: PlanSidebarViewModel, theme: Si
     : `${theme.fg("muted", "Next:")} ${model.nextAction}`;
   const statusParts = [
     warningCount > 0 ? theme.fg("warning", `Warnings: ${warningCount}`) : undefined,
-    model.subagents.length > 0 ? `${theme.fg("muted", "Agents:")} ${summarizeSubagents(theme, model.subagents)}` : undefined,
+    compactSubagentLine(theme, model.subagents),
   ].filter(Boolean);
   const line4 = statusParts.length > 0 ? statusParts.join(theme.fg("dim", " · ")) : undefined;
   return [line1, line2, line3, line4]
@@ -411,6 +475,35 @@ export function getDockedSidebarLayout(totalWidth: number, model?: PlanSidebarVi
   if (editorWidth < MIN_DOCKED_EDITOR_WIDTH) return undefined;
 
   return { editorWidth, sidebarWidth, gutterWidth };
+}
+
+export function getPlanWorkflowPresentation(
+  totalWidth: number | undefined,
+  model?: PlanSidebarViewModel,
+  options: { allowDocked?: boolean } = {},
+): PlanWorkflowPresentation {
+  if (!model) return { mode: "hidden" };
+  if (typeof totalWidth !== "number") return { mode: "pending" };
+  if (options.allowDocked === false) {
+    return {
+      mode: "compact",
+      width: totalWidth,
+    };
+  }
+
+  const layout = getDockedSidebarLayout(totalWidth, model);
+  if (layout) {
+    return {
+      mode: "docked",
+      width: totalWidth,
+      layout,
+    };
+  }
+
+  return {
+    mode: "compact",
+    width: totalWidth,
+  };
 }
 
 export function renderDockedSidebarLayout(

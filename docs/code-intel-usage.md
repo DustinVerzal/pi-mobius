@@ -7,6 +7,24 @@
 
 For the MVP, **generic MCP bridging remains deferred**. Pi exposes these capabilities as Pi-native tools instead of routing through a generic MCP client/server layer.
 
+## What codemap support means today
+
+If you are asking whether Pi already has codemap support in this repo, the answer is **yes**.
+
+What exists today:
+
+- an on-demand bounded repo/subtree map via `code_intel_repo_map`
+- structural and symbol-aware follow-up via `code_intel_ast_search`
+- semantic TypeScript follow-up via `code_intel_definition`, `code_intel_references`, and `code_intel_hover`
+
+What does **not** exist today:
+
+- a persisted codemap artifact on disk
+- maintained ownership summaries
+- generic MCP-backed codemap tooling
+
+For the evidence-backed current-state memo, see [`docs/codemap-gap-analysis.md`](./codemap-gap-analysis.md). For a deterministic setup and verification flow, see [`docs/codemap-adoption-guide.md`](./codemap-adoption-guide.md).
+
 ## Quick setup
 
 ### Local checkout / contributor flow
@@ -42,6 +60,18 @@ Then start Pi in that project and run:
 ```text
 /reload
 ```
+
+## Fast verification
+
+A new user can confirm the shipped codemap surface with this sequence:
+
+```text
+1. Use code_intel_repo_map on extensions/code-intel
+2. Use code_intel_ast_search with the pattern pi.registerTool($$$ARGS) under extensions/
+3. Use code_intel_definition for extensions/code-intel/lsp.ts at line 487, column 22
+```
+
+If those calls work, the current codemap workflow is available in Pi for this repo.
 
 ## Tool reference
 

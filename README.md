@@ -28,6 +28,7 @@ pi install <git-or-https-source>
 - **Subagent bridge** around `@tintinweb/pi-subagents`, including `/agents` and `/subagents-info`
 - **Prompt improvement** via the bundled `prompt-master` skill and helper commands
 - **Code intelligence** tools for AST search and TypeScript LSP navigation
+- **Tool-routing guidance** that nudges JS/TS exploration toward code-intel before grep
 - **RTK bash integration** that rewrites Pi `bash` calls through `rtk rewrite` when RTK is installed
 - **Theme**: `opencode-nord`
 
@@ -81,6 +82,50 @@ npm install
 pi -e .
 ```
 
+## Ecosystem installer
+
+This repo now ships a bootstrap utility for the broader Pi setup I currently use. By default it installs:
+
+- `pi-mobius`
+- `npm:pi-tool-display`
+- `npm:pi-context`
+- `npm:pi-web-access`
+- `npm:pi-mcp-adapter`
+
+It also applies the shared Pi UI defaults used in this repo, including `opencode-nord`, without touching model/provider credentials.
+
+Global install from this checkout:
+
+```bash
+npm install
+npm run install:ecosystem
+```
+
+Project-local install into another repo:
+
+```bash
+npm install
+npm run install:ecosystem -- --scope local --project /path/to/consumer-project
+```
+
+Portable install using a git source for `pi-mobius` instead of the local checkout:
+
+```bash
+npm run install:ecosystem -- --self-source <git-or-https-source>
+```
+
+Preview everything without changing your system:
+
+```bash
+npm run install:ecosystem -- --dry-run
+```
+
+Use `--only` if you want a subset, for example:
+
+```bash
+npm run install:ecosystem -- --only pi-mobius,pi-context
+```
+
 ## Quick start
 
 After install, start Pi in the scope where the package is active and verify:
@@ -89,9 +134,12 @@ After install, start Pi in the scope where the package is active and verify:
 - `/plan status` — shows current planning state
 - `/agents` — opens the bundled subagent UI
 - `/rtk-status` — reports whether RTK rewriting is active
-- ask Pi to use `code_intel_repo_map` on `extensions/` — confirms the code-intel tools are available
+- ask Pi to use `code_intel_repo_map` on `extensions/code-intel` — confirms the code-intel tools are available
+- look at the footer under `opencode-nord` — confirms the bundled context footer is active and shows path, branch, model, thinking, and usage/context state without powerline styling
 
 If Pi is already running when you install the package, run `/reload`.
+
+For the current codemap answer in this repo, see [`docs/codemap-gap-analysis.md`](docs/codemap-gap-analysis.md) and the deterministic verification flow in [`docs/codemap-adoption-guide.md`](docs/codemap-adoption-guide.md).
 
 ## Usage
 
@@ -100,7 +148,7 @@ If Pi is already running when you install the package, run `/reload`.
 Commands:
 
 - `/plan` — enter plan mode in the current session
-- `/plan <request>` — improve the request with `prompt-master`, then start a fresh planning session
+- `/plan <request>` — start a fresh planning session from the request bootstrap
 - `/plan status` — show current plan file, mode, and panel visibility
 - `/plan sidebar` — toggle the workflow rail / compact panel
 
@@ -130,6 +178,8 @@ Available entry points:
 
 This package includes a repo-owned `code-intel` extension.
 
+**Codemap support today:** `pi-mobius` already ships an on-demand codemap workflow through `extensions/code-intel/`. The current surface is a bounded repo/symbol map plus TypeScript semantic follow-up, not a persisted codemap file or ownership database.
+
 Tool families:
 
 - **AST**: `code_intel_repo_map`, `code_intel_ast_search`
@@ -148,7 +198,7 @@ Examples:
 - `Use code_intel_ast_search with pi.registerTool($$$ARGS) under extensions/.`
 - `Use code_intel_definition for extensions/code-intel/lsp.ts at line 487, column 22.`
 
-For setup notes, decision boundaries, troubleshooting, and example workflows, see [`docs/code-intel-usage.md`](docs/code-intel-usage.md).
+For setup notes, example workflows, and troubleshooting, see [`docs/code-intel-usage.md`](docs/code-intel-usage.md). For the evidence-backed codemap decision and a deterministic new-user verification flow, see [`docs/codemap-gap-analysis.md`](docs/codemap-gap-analysis.md) and [`docs/codemap-adoption-guide.md`](docs/codemap-adoption-guide.md).
 
 ### RTK bash integration
 
@@ -176,6 +226,28 @@ Select the bundled theme in your Pi config:
 }
 ```
 
+### Context footer
+
+`pi-mobius` also installs a repo-owned custom footer through Pi's supported `ctx.ui.setFooter()` extension API. The footer is enabled automatically when the package is active; you do **not** need to re-enable Pi powerline styling.
+
+Under `opencode-nord`, the footer uses a stacked, non-powerline layout:
+
+- **Line 1** — active repo/path plus git branch
+- **Line 2** — usage/context on the left and model + thinking level on the right
+- **Line 3** — extension statuses, with `PLAN` first when plan mode is active
+
+Reload after install or changes:
+
+```text
+/reload
+```
+
+Local validation flow inside tmux:
+
+1. Start Pi in a normal session and confirm the footer shows the active path, branch, model, thinking level, and usage/context state.
+2. Enter `/plan` or `/plan status` and confirm the `PLAN` status stays readable on the footer's status line instead of colliding with the main context lines.
+3. Keep `opencode-nord` selected; do not reintroduce powerline separators or glyph-based footer segments.
+
 ### Pi multiline input (`Ctrl+J`)
 
 `pi-mobius` does not change Pi's input behavior. Pi already exposes newline insertion as the configurable `tui.input.newLine` keybinding, which defaults to `shift+enter`.
@@ -193,10 +265,12 @@ Then run `/reload`.
 ## Package contents
 
 - `extensions/opencode-plan-mode/` — plan mode, workflow rail / compact panel, `question`, `plan_enter`, and `plan_exit`
+- `extensions/opencode-context-footer/` — repo-owned custom footer for path/branch/model/thinking/context display with PLAN-aware status ordering
 - `extensions/subagents-bridge/` — local wrapper around `@tintinweb/pi-subagents`
 - `extensions/prompt-master-injection/` — prompt-improvement helpers around the bundled skill
 - `extensions/rtk-integration/` — RTK-backed `bash` rewriting with fail-open fallback
 - `extensions/code-intel/` — AST-backed repo mapping / structural search and TypeScript LSP workflows
+- `extensions/code-intel-guidance/` — session-wide tool-routing guidance that prefers code-intel for JS/TS exploration
 - `skills/prompt-master/` — bundled prompt-improvement skill
 - `themes/opencode-nord.json` — bundled theme
 
