@@ -45,6 +45,7 @@ export class DockedPlanModeEditor extends CustomEditor {
   private lastRenderWidth: number | undefined;
 
   private presentationKey: string | undefined;
+  private disposed = false;
 
   constructor(
     tui: ConstructorParameters<typeof CustomEditor>[0],
@@ -56,6 +57,7 @@ export class DockedPlanModeEditor extends CustomEditor {
   ) {
     super(tui, theme, keybindings);
     this.railOverlay = new WorkflowRailOverlay(tui, sidebarTheme);
+    this.lastRenderWidth = tui.terminal.columns;
   }
 
   private getPresentationKey(width = this.lastRenderWidth, state = this.sidebarState): string {
@@ -65,25 +67,27 @@ export class DockedPlanModeEditor extends CustomEditor {
     return presentation.mode;
   }
 
-  private notifyPresentationChange(): void {
+  private updatePresentationKey(): boolean {
     const nextKey = this.getPresentationKey();
-    if (nextKey === this.presentationKey) return;
+    if (nextKey === this.presentationKey) return false;
     this.presentationKey = nextKey;
-    this.onPresentationChange?.();
+    return true;
   }
 
-  private syncRail(width?: number): void {
+  private syncRail(width?: number): boolean {
     const resolvedWidth = typeof width === "number" ? width : this.lastRenderWidth;
     const presentation = getPlanWorkflowPresentation(resolvedWidth, this.sidebarState);
     this.railOverlay.setModel(this.sidebarState);
 
     if (presentation.mode !== "docked") {
-      if (presentation.mode !== "pending") {
-        this.railHandle?.setHidden(true);
+      if (presentation.mode !== "pending" && this.railHandle && !this.railHandle.isHidden()) {
+        this.railHandle.setHidden(true);
+        return true;
       }
-      return;
+      return false;
     }
 
+    let changed = false;
     if (!this.railHandle || this.railWidth !== presentation.layout.sidebarWidth) {
       this.railHandle?.hide();
       this.railHandle = this.tui.showOverlay(this.railOverlay, {
@@ -95,21 +99,31 @@ export class DockedPlanModeEditor extends CustomEditor {
         visible: (termWidth) => getPlanWorkflowPresentation(termWidth, this.sidebarState).mode === "docked",
       });
       this.railWidth = presentation.layout.sidebarWidth;
+      changed = true;
     }
 
-    this.railHandle.setHidden(false);
+    if (this.railHandle.isHidden()) {
+      this.railHandle.setHidden(false);
+      changed = true;
+    }
+
+    return changed;
   }
 
   setSidebarState(state: PlanSidebarViewModel | undefined): void {
+    if (this.disposed) return;
     const nextSignature = getSidebarStateSignature(state);
     if (nextSignature === this.sidebarStateSignature) return;
 
     this.sidebarState = state;
     this.sidebarStateSignature = nextSignature;
-    this.syncRail();
-    this.notifyPresentationChange();
-    this.invalidate();
-    this.tui.requestRender();
+    const railChanged = this.syncRail();
+    if (this.updatePresentationKey()) {
+      this.onPresentationChange?.();
+    }
+    if (!railChanged && this.getWorkflowPresentation().mode === "docked") {
+      this.tui.requestRender();
+    }
   }
 
   getWorkflowPresentation(
@@ -124,9 +138,17 @@ export class DockedPlanModeEditor extends CustomEditor {
   }
 
   render(width: number): string[] {
-    this.lastRenderWidth = width;
-    this.syncRail(width);
-    this.notifyPresentationChange();
+    if (this.lastRenderWidth !== width) {
+      this.lastRenderWidth = width;
+      this.syncRail(width);
+      if (this.updatePresentationKey()) {
+        queueMicrotask(() => {
+          if (!this.disposed) {
+            this.onPresentationChange?.();
+          }
+        });
+      }
+    }
     return super.render(width);
   }
 
@@ -139,6 +161,7 @@ export class DockedPlanModeEditor extends CustomEditor {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.railHandle?.hide();
     this.railHandle = undefined;
     this.railWidth = undefined;

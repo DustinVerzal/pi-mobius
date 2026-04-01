@@ -569,8 +569,8 @@ test('approval -> execution wide handoff removes duplicate PLAN status/widget/si
   );
   assert.equal(
     mutations.requestRenderCount,
-    1,
-    'remove duplicate tui.requestRender() calls during the wide approval -> execution handoff',
+    0,
+    'remove extra tui.requestRender() calls during the wide approval -> execution handoff once overlay visibility changes already trigger their own renders',
   );
   assert.equal(mutations.showOverlayCount, 1);
 });
@@ -613,18 +613,15 @@ test('plan mode keeps PLAN status in setStatus while the workflow summary stays 
   assert.ok(compactWidget.content.some((line) => line.includes('PLAN 0/2')));
 });
 
-test('execution handoff and narrow terminals use the workflow widget instead of appending fallback editor lines', async () => {
+test('wide execution mounts the rail immediately, while narrow terminals still use the workflow widget instead of appending fallback editor lines', async () => {
   const { ui, overlayHarness, editor } = await setupExtensionWithState('executing');
 
-  const initialWidget = ui.widgets.get(WORKFLOW_WIDGET_KEY);
-  assert.ok(initialWidget);
-  assert.equal(initialWidget.options?.placement, 'belowEditor');
-  assert.ok(initialWidget.content.some((line) => line.includes('PLAN')));
-
-  editor.render(140);
-  await flushMicrotasks();
   assert.equal(ui.widgets.has(WORKFLOW_WIDGET_KEY), false);
   assert.equal(overlayHarness.handles.length, 1);
+
+  const wideLines = editor.render(140);
+  await flushMicrotasks();
+  assert.ok(wideLines.every((line) => !line.includes('PLAN')));
 
   const narrowLines = editor.render(80);
   await flushMicrotasks();
@@ -639,11 +636,11 @@ test('execution handoff and narrow terminals use the workflow widget instead of 
   assert.deepEqual(overlayHarness.handles[0].setHiddenCalls, [true, false]);
 });
 
-test('restore into wide execution keeps the widget until the first rail activation and avoids editor fallback text', async () => {
+test('restore into wide execution activates the rail as soon as the editor mounts and avoids editor fallback text', async () => {
   const { ui, overlayHarness, timeline, editor } = await setupExtensionWithState('executing');
 
-  assert.equal(overlayHarness.handles.length, 0);
-  assert.equal(ui.widgets.has(WORKFLOW_WIDGET_KEY), true);
+  assert.equal(overlayHarness.handles.length, 1);
+  assert.equal(ui.widgets.has(WORKFLOW_WIDGET_KEY), false);
 
   const wideLines = editor.render(140);
   await flushMicrotasks();

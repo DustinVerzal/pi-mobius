@@ -1,6 +1,7 @@
 {
   "packages": [
     "..",
+    "npm:@manojlds/ralphi",
     {
       "source": "npm:@tintinweb/pi-subagents",
       "extensions": []
